@@ -1,15 +1,12 @@
-<?php
-// services.php - Battery & Inverter Service Management API
+﻿<?php
 header('Content-Type: application/json');
 header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With');
 
-// Enable error reporting for debugging (disable in production)
 error_reporting(E_ALL);
 ini_set('display_errors', 1);
 
-// Database configuration
 $config = [
     'host' => '127.0.0.1',
     'dbname' => 'sun_office',
@@ -18,7 +15,6 @@ $config = [
     'charset' => 'utf8mb4'
 ];
 
-// Database connection
 try {
     $pdo = new PDO(
         "mysql:host={$config['host']};dbname={$config['dbname']};charset={$config['charset']}",
@@ -30,31 +26,22 @@ try {
             PDO::ATTR_EMULATE_PREPARES => false
         ]
     );
-    
-    // Set collation for the connection to handle mixed collations
     $pdo->exec("SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci");
-    
-} catch(PDOException $e) {
+    ensureServiceOrdersMultiIdColumns($pdo);
+    ensureMappingTables($pdo);
+    ensureServiceOrderCodeTrigger($pdo);
+} catch (PDOException $e) {
     http_response_code(500);
-    echo json_encode([
-        'success' => false,
-        'message' => 'Database connection failed',
-        'error' => $e->getMessage()
-    ]);
+    echo json_encode(['success' => false, 'message' => 'Database connection failed', 'error' => $e->getMessage()]);
     exit;
 }
 
-// Handle CORS preflight requests
-if ($_SERVER['REQUEST_METHOD'] == 'OPTIONS') {
+if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     http_response_code(200);
-    exit();
+    exit;
 }
 
-// Get request method
-$method = $_SERVER['REQUEST_METHOD'];
-
-// Route the request
-switch($method) {
+switch ($_SERVER['REQUEST_METHOD']) {
     case 'GET':
         handleGetRequest($pdo);
         break;
@@ -69,850 +56,596 @@ switch($method) {
         break;
     default:
         http_response_code(405);
-        echo json_encode([
-            'success' => false,
-            'message' => 'Method not allowed'
-        ]);
-        break;
+        echo json_encode(['success' => false, 'message' => 'Method not allowed']);
 }
 
-/**
- * Handle GET requests
- */
-function handleGetRequest($pdo) {
-    // Get query parameters
-    $params = $_GET;
-    $id = isset($params['id']) ? (int)$params['id'] : null;
-    
-    // If ID is provided, get single service order
-    if ($id) {
-        getServiceOrder($pdo, $id);
-        return;
-    }
-    
-    // Check for filters
-    $whereConditions = [];
-    $queryParams = [];
-    
-    // Customer filter
-    if (isset($params['customer_id']) && !empty($params['customer_id'])) {
-        $whereConditions[] = 'so.customer_id = ?';
-        $queryParams[] = (int)$params['customer_id'];
-    }
-    
-    // Staff filter
-    if (isset($params['staff_id']) && !empty($params['staff_id'])) {
-        $whereConditions[] = 'so.service_staff_id = ?';
-        $queryParams[] = (int)$params['staff_id'];
-    }
-    
-    // Battery filter - Handle null values properly
-    if (isset($params['battery_id'])) {
-        if ($params['battery_id'] === 'null' || $params['battery_id'] === '') {
-            $whereConditions[] = 'so.battery_id IS NULL';
-        } elseif (!empty($params['battery_id'])) {
-            $whereConditions[] = 'so.battery_id = ?';
-            $queryParams[] = (int)$params['battery_id'];
-        }
-    }
-    
-    // Inverter filter - Handle null values properly
-    if (isset($params['inverter_id'])) {
-        if ($params['inverter_id'] === 'null' || $params['inverter_id'] === '') {
-            $whereConditions[] = 'so.inverter_id IS NULL';
-        } elseif (!empty($params['inverter_id'])) {
-            $whereConditions[] = 'so.inverter_id = ?';
-            $queryParams[] = (int)$params['inverter_id'];
-        }
-    }
-    
-    // Warranty status filter
-    if (isset($params['warranty_status']) && !empty($params['warranty_status'])) {
-        $validWarrantyStatuses = ['in_warranty', 'extended_warranty', 'out_of_warranty'];
-        if (in_array($params['warranty_status'], $validWarrantyStatuses)) {
-            $whereConditions[] = 'so.warranty_status = ?';
-            $queryParams[] = $params['warranty_status'];
-        }
-    }
-    
-    // AMC status filter
-    if (isset($params['amc_status']) && !empty($params['amc_status'])) {
-        $validAmcStatuses = ['active', 'expired', 'no_amc'];
-        if (in_array($params['amc_status'], $validAmcStatuses)) {
-            $whereConditions[] = 'so.amc_status = ?';
-            $queryParams[] = $params['amc_status'];
-        }
-    }
-    
-    // Date range filter
-    if (isset($params['start_date']) && !empty($params['start_date'])) {
-        $whereConditions[] = 'DATE(so.created_at) >= ?';
-        $queryParams[] = $params['start_date'];
-    }
-    
-    if (isset($params['end_date']) && !empty($params['end_date'])) {
-        $whereConditions[] = 'DATE(so.created_at) <= ?';
-        $queryParams[] = $params['end_date'];
-    }
-    
-    // Search filter - FIXED COLLATION ISSUE
-    if (isset($params['search']) && !empty($params['search'])) {
-        $searchTerm = '%' . $params['search'] . '%';
-        
-        // Use COLLATE to force consistent collation for all string comparisons
-        $whereConditions[] = '(so.service_code COLLATE utf8mb4_unicode_ci LIKE ? OR ' .
-                            'so.notes COLLATE utf8mb4_unicode_ci LIKE ? OR ' .
-                            'IFNULL(b.battery_serial, "") COLLATE utf8mb4_unicode_ci LIKE ? OR ' .
-                            'IFNULL(i.inverter_serial, "") COLLATE utf8mb4_unicode_ci LIKE ? OR ' .
-                            'so.customer_phone COLLATE utf8mb4_unicode_ci LIKE ? OR ' .
-                            'IFNULL(c.full_name, "") COLLATE utf8mb4_unicode_ci LIKE ?)';
-        
-        // Add search term for each field (6 times)
-        for ($i = 0; $i < 6; $i++) {
-            $queryParams[] = $searchTerm;
-        }
-    }
-    
-    // Build WHERE clause
-    $whereClause = '';
-    if (!empty($whereConditions)) {
-        $whereClause = 'WHERE ' . implode(' AND ', $whereConditions);
-    }
-    
-    // Pagination
-    $limit = isset($params['limit']) ? (int)$params['limit'] : 50;
-    $page = isset($params['page']) ? (int)$params['page'] : 1;
-    $offset = ($page - 1) * $limit;
-    
-    // Get total count for pagination
-    $countSql = "
-        SELECT COUNT(*) as total 
-        FROM service_orders so
-        LEFT JOIN customers c ON so.customer_id = c.id
-        LEFT JOIN batteries b ON so.battery_id = b.id
-        LEFT JOIN inverters i ON so.inverter_id = i.id
-        $whereClause
-    ";
-    
+function ensureServiceOrdersMultiIdColumns(PDO $pdo): void {
     try {
-        $countStmt = $pdo->prepare($countSql);
-        if (!empty($queryParams)) {
-            $countStmt->execute($queryParams);
-        } else {
-            $countStmt->execute();
-        }
-        $totalCount = $countStmt->fetch()['total'];
-        $totalPages = ceil($totalCount / $limit);
-    } catch(PDOException $e) {
-        error_log("Count query error: " . $e->getMessage());
-        $totalCount = 0;
-        $totalPages = 0;
+        $pdo->exec("
+            ALTER TABLE service_orders
+            ADD COLUMN battery_ids LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL
+            CHECK (json_valid(battery_ids))
+        ");
+    } catch (PDOException $e) {
+        // Column may already exist
     }
-    
-    // Main query to get service orders
-    $sql = "
-        SELECT so.id, 
-               so.service_code, 
-               so.customer_id, 
-               so.customer_phone, 
-               so.battery_id, 
-               so.inverter_id,
-               so.service_staff_id, 
-               so.warranty_status, 
-               so.amc_status, 
-               so.notes, 
-               so.created_at, 
-               so.updated_at,
-               
-               -- Battery details
-               b.battery_model, 
-               b.battery_serial,
-               b.brand as battery_brand,
-               b.capacity as battery_capacity,
-               b.voltage as battery_voltage,
-               b.battery_type,
-               b.purchase_date as battery_purchase_date,
-               b.installation_date as battery_installation_date,
-               b.warranty_period as battery_warranty,
-               
-               -- Inverter details
-               i.inverter_model,
-               i.inverter_serial,
-               i.inverter_brand,
-               i.power_rating,
-               i.wave_type,
-               i.battery_voltage as inverter_battery_voltage,
-               i.purchase_date as inverter_purchase_date,
-               i.installation_date as inverter_installation_date,
-               i.warranty_period as inverter_warranty,
-               
-               -- Staff details
-               u.name as staff_name,
-               u.email as staff_email,
-               
-               -- Customer details
-               c.full_name as customer_name,
-               c.email as customer_email,
-               c.phone as customer_phone_number,
-               c.address as customer_address,
-               c.city as customer_city
-               
-        FROM service_orders so
-        LEFT JOIN batteries b ON so.battery_id = b.id
-        LEFT JOIN inverters i ON so.inverter_id = i.id
-        LEFT JOIN users u ON so.service_staff_id = u.id
-        LEFT JOIN customers c ON so.customer_id = c.id
-        $whereClause
-        ORDER BY so.created_at DESC
-        LIMIT ? OFFSET ?
-    ";
-    
-    // Add pagination parameters
-    $queryParamsWithPagination = array_merge($queryParams, [$limit, $offset]);
-    
+
     try {
-        $stmt = $pdo->prepare($sql);
-        $stmt->execute($queryParamsWithPagination);
-        $services = $stmt->fetchAll();
-        
-        // Format the response
-        foreach ($services as &$service) {
-            $service['has_battery'] = !is_null($service['battery_id']);
-            $service['has_inverter'] = !is_null($service['inverter_id']);
-        }
-        
-        echo json_encode([
-            'success' => true,
-            'data' => $services,
-            'pagination' => [
-                'total' => $totalCount,
-                'page' => $page,
-                'limit' => $limit,
-                'total_pages' => $totalPages
-            ],
-            'filters' => [
-                'warranty_statuses' => ['in_warranty', 'extended_warranty', 'out_of_warranty'],
-                'amc_statuses' => ['active', 'expired', 'no_amc']
-            ]
-        ]);
-        
-    } catch(PDOException $e) {
-        http_response_code(500);
-        echo json_encode([
-            'success' => false,
-            'message' => 'Failed to fetch service orders',
-            'error' => $e->getMessage()
-        ]);
+        $pdo->exec("
+            ALTER TABLE service_orders
+            ADD COLUMN inverter_ids LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL
+            CHECK (json_valid(inverter_ids))
+        ");
+    } catch (PDOException $e) {
+        // Column may already exist
     }
 }
 
-/**
- * Get single service order
- */
-function getServiceOrder($pdo, $id) {
-    try {
-        $sql = "
-            SELECT so.id, 
-                   so.service_code, 
-                   so.customer_id, 
-                   so.customer_phone, 
-                   so.battery_id, 
-                   so.inverter_id,
-                   so.service_staff_id, 
-                   so.warranty_status, 
-                   so.amc_status, 
-                   so.notes, 
-                   so.created_at, 
-                   so.updated_at,
-                   
-                   -- Battery details
-                   b.battery_model, 
-                   b.battery_serial,
-                   b.brand as battery_brand,
-                   b.capacity as battery_capacity,
-                   b.voltage as battery_voltage,
-                   b.battery_type,
-                   b.purchase_date as battery_purchase_date,
-                   b.installation_date as battery_installation_date,
-                   b.warranty_period as battery_warranty,
-                   
-                   -- Inverter details
-                   i.inverter_model,
-                   i.inverter_serial,
-                   i.inverter_brand,
-                   i.power_rating,
-                   i.wave_type,
-                   i.battery_voltage as inverter_battery_voltage,
-                   i.purchase_date as inverter_purchase_date,
-                   i.installation_date as inverter_installation_date,
-                   i.warranty_period as inverter_warranty,
-                   
-                   -- Staff details
-                   u.name as staff_name,
-                   u.email as staff_email,
-                   
-                   -- Customer details
-                   c.full_name as customer_name,
-                   c.email as customer_email,
-                   c.phone as customer_phone_number,
-                   c.address as customer_address,
-                   c.city as customer_city
-                   
-            FROM service_orders so
-            LEFT JOIN batteries b ON so.battery_id = b.id
-            LEFT JOIN inverters i ON so.inverter_id = i.id
-            LEFT JOIN users u ON so.service_staff_id = u.id
-            LEFT JOIN customers c ON so.customer_id = c.id
-            WHERE so.id = ?
-        ";
-        
-        $stmt = $pdo->prepare($sql);
-        $stmt->execute([$id]);
-        $service = $stmt->fetch();
-        
-        if (!$service) {
-            http_response_code(404);
-            echo json_encode([
-                'success' => false,
-                'message' => 'Service order not found'
-            ]);
-            return;
-        }
-        
-        // Add boolean flags
-        $service['has_battery'] = !is_null($service['battery_id']);
-        $service['has_inverter'] = !is_null($service['inverter_id']);
-        
-        echo json_encode([
-            'success' => true,
-            'data' => $service
-        ]);
-        
-    } catch(PDOException $e) {
-        http_response_code(500);
-        echo json_encode([
-            'success' => false,
-            'message' => 'Failed to fetch service order details',
-            'error' => $e->getMessage()
-        ]);
-    }
+function ensureMappingTables(PDO $pdo): void {
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS service_order_batteries (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            service_order_id INT NOT NULL,
+            battery_id INT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE KEY uniq_service_battery (service_order_id, battery_id),
+            KEY idx_sob_service (service_order_id),
+            KEY idx_sob_battery (battery_id),
+            CONSTRAINT fk_sob_service FOREIGN KEY (service_order_id) REFERENCES service_orders(id) ON DELETE CASCADE,
+            CONSTRAINT fk_sob_battery FOREIGN KEY (battery_id) REFERENCES batteries(id) ON DELETE RESTRICT
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    ");
+
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS service_order_inverters (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            service_order_id INT NOT NULL,
+            inverter_id INT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE KEY uniq_service_inverter (service_order_id, inverter_id),
+            KEY idx_soi_service (service_order_id),
+            KEY idx_soi_inverter (inverter_id),
+            CONSTRAINT fk_soi_service FOREIGN KEY (service_order_id) REFERENCES service_orders(id) ON DELETE CASCADE,
+            CONSTRAINT fk_soi_inverter FOREIGN KEY (inverter_id) REFERENCES inverters(id) ON DELETE RESTRICT
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    ");
 }
 
-/**
- * Handle POST requests (create new service order)
- */
-function handlePostRequest($pdo) {
-    // Get input data
-    $input = getInputData();
-    
-    // Debug log
-    error_log("POST Request Input: " . json_encode($input));
-    
-    // Validate required fields - both battery_id and inverter_id are optional
-    $requiredFields = ['customer_id'];
-    $missingFields = [];
-    
-    foreach ($requiredFields as $field) {
-        if (!isset($input[$field]) || empty($input[$field])) {
-            $missingFields[] = $field;
-        }
-    }
-    
-    if (!empty($missingFields)) {
-        http_response_code(400);
-        echo json_encode([
-            'success' => false,
-            'message' => 'Missing required fields',
-            'missing_fields' => $missingFields
-        ]);
-        return;
-    }
-    
-    try {
-        // Begin transaction
-        $pdo->beginTransaction();
-        
-        // Get customer phone if not provided
-        $customerPhone = isset($input['customer_phone']) && !empty($input['customer_phone']) 
-            ? $input['customer_phone'] 
-            : null;
-        
-        // If customer phone is not provided, try to get it from customers table
-        if (empty($customerPhone) && isset($input['customer_id']) && !empty($input['customer_id'])) {
-            $customerSql = "SELECT phone FROM customers WHERE id = ?";
-            $customerStmt = $pdo->prepare($customerSql);
-            $customerStmt->execute([(int)$input['customer_id']]);
-            $customer = $customerStmt->fetch();
-            if ($customer && !empty($customer['phone'])) {
-                $customerPhone = $customer['phone'];
-            }
-        }
-        
-        // Generate service code (format: SVC-YYYYMMDD-XXXX)
-        $datePrefix = date('Ymd');
-        
-        // Check if there are any records today
-        $codeSql = "SELECT COUNT(*) as count FROM service_orders WHERE DATE(created_at) = CURDATE()";
-        $codeStmt = $pdo->query($codeSql);
-        $codeCount = $codeStmt->fetch()['count'] + 1;
-        $serviceCode = 'SVC-' . $datePrefix . '-' . str_pad($codeCount, 4, '0', STR_PAD_LEFT);
-        
-        // Determine warranty status (default if not provided)
-        $warrantyStatus = isset($input['warranty_status']) && !empty($input['warranty_status']) 
-            ? $input['warranty_status'] 
-            : 'out_of_warranty';
-        
-        // Determine AMC status (default if not provided)
-        $amcStatus = isset($input['amc_status']) && !empty($input['amc_status']) 
-            ? $input['amc_status'] 
-            : 'no_amc';
-        
-        // Handle battery_id - can be null
-        $batteryId = null;
-        if (isset($input['battery_id']) && !empty($input['battery_id']) && $input['battery_id'] !== 'null' && $input['battery_id'] !== '') {
-            $batteryId = (int)$input['battery_id'];
-        }
-        
-        // Handle inverter_id - can be null
-        $inverterId = null;
-        if (isset($input['inverter_id']) && !empty($input['inverter_id']) && $input['inverter_id'] !== 'null' && $input['inverter_id'] !== '') {
-            $inverterId = (int)$input['inverter_id'];
-        }
-        
-        // Handle service_staff_id - can be null
-        $serviceStaffId = null;
-        if (isset($input['service_staff_id']) && !empty($input['service_staff_id']) && $input['service_staff_id'] !== 'null' && $input['service_staff_id'] !== '') {
-            $serviceStaffId = (int)$input['service_staff_id'];
-        }
-        
-        // Handle notes
-        $notes = isset($input['notes']) && !empty($input['notes']) ? trim($input['notes']) : null;
-        
-        // Insert service order
-        $sql = "
-            INSERT INTO service_orders (
-                service_code,
-                customer_id, 
-                customer_phone, 
-                battery_id,
-                inverter_id,
-                service_staff_id, 
-                warranty_status, 
-                amc_status,
-                notes, 
-                created_at, 
-                updated_at
-            ) VALUES (
-                :service_code,
-                :customer_id, 
-                :customer_phone, 
-                :battery_id,
-                :inverter_id,
-                :service_staff_id, 
-                :warranty_status, 
-                :amc_status,
-                :notes, 
-                NOW(), 
-                NOW()
-            )
-        ";
-        
-        $stmt = $pdo->prepare($sql);
-        $result = $stmt->execute([
-            ':service_code' => $serviceCode,
-            ':customer_id' => (int)$input['customer_id'],
-            ':customer_phone' => $customerPhone,
-            ':battery_id' => $batteryId,
-            ':inverter_id' => $inverterId,
-            ':service_staff_id' => $serviceStaffId,
-            ':warranty_status' => $warrantyStatus,
-            ':amc_status' => $amcStatus,
-            ':notes' => $notes
-        ]);
-        
-        if (!$result) {
-            throw new Exception('Failed to insert service order');
-        }
-        
-        $serviceId = $pdo->lastInsertId();
-        
-        // Get the created service order with all details
-        $createdService = getServiceOrderById($pdo, $serviceId);
-        
-        // Commit transaction
-        $pdo->commit();
-        
-        http_response_code(201);
-        echo json_encode([
-            'success' => true,
-            'message' => 'Service order created successfully',
-            'data' => $createdService,
-            'service_id' => $serviceId,
-            'service_code' => $serviceCode
-        ]);
-        
-    } catch(Exception $e) {
-        $pdo->rollBack();
-        http_response_code(500);
-        echo json_encode([
-            'success' => false,
-            'message' => 'Failed to create service order: ' . $e->getMessage(),
-            'error' => $e->getMessage(),
-            'debug' => [
-                'input' => $input,
-                'error_code' => $e->getCode()
-            ]
-        ]);
-    }
+
+function ensureServiceOrderCodeTrigger(PDO $pdo): void {
+    $pdo->exec("DROP TRIGGER IF EXISTS before_service_orders_insert");
+    $pdo->exec("
+        CREATE TRIGGER before_service_orders_insert
+        BEFORE INSERT ON service_orders
+        FOR EACH ROW
+        BEGIN
+            IF NEW.service_code IS NULL OR NEW.service_code = '' THEN
+                SET NEW.service_code = CONCAT(
+                    'SVC-',
+                    DATE_FORMAT(NOW(), '%Y%m%d'),
+                    '-',
+                    LPAD(
+                        (
+                            SELECT COALESCE(MAX(CAST(SUBSTRING(service_code, 14) AS UNSIGNED)), 0) + 1
+                            FROM service_orders
+                            WHERE service_code LIKE CONCAT('SVC-', DATE_FORMAT(NOW(), '%Y%m%d'), '-%')
+                        ),
+                        4,
+                        '0'
+                    )
+                );
+            END IF;
+        END
+    ");
 }
-
-/**
- * Handle PUT requests (update service order)
- */
-function handlePutRequest($pdo) {
-    // Get input data
-    $input = getInputData();
-    
-    // Debug: Log the received input
-    error_log("PUT Request Input: " . json_encode($input));
-    
-    // Check for ID
-    $id = null;
-    
-    if (isset($input['id']) && !empty($input['id'])) {
-        $id = (int)$input['id'];
-    } elseif (isset($input['service_id']) && !empty($input['service_id'])) {
-        $id = (int)$input['service_id'];
-    } elseif (isset($_GET['id']) && !empty($_GET['id'])) {
-        $id = (int)$_GET['id'];
-    }
-    
-    if (!$id || $id <= 0) {
-        http_response_code(400);
-        echo json_encode([
-            'success' => false,
-            'message' => 'Service order ID is required',
-            'debug' => $input
-        ]);
-        return;
-    }
-    
-    // Check if service order exists
-    $existingService = getServiceOrderById($pdo, $id);
-    if (!$existingService) {
-        http_response_code(404);
-        echo json_encode([
-            'success' => false,
-            'message' => 'Service order not found',
-            'service_id' => $id
-        ]);
-        return;
-    }
-    
-    try {
-        // Begin transaction
-        $pdo->beginTransaction();
-        
-        // Build dynamic update query based on provided fields
-        $updateFields = [];
-        $params = [':id' => $id];
-        
-        // Fields that exist in the table
-        $updatableFields = [
-            'customer_id', 
-            'customer_phone', 
-            'battery_id', 
-            'inverter_id',
-            'service_staff_id',
-            'warranty_status', 
-            'amc_status', 
-            'notes'
-        ];
-        
-        foreach ($updatableFields as $field) {
-            if (array_key_exists($field, $input)) {
-                if (in_array($field, ['customer_id', 'service_staff_id'])) {
-                    $updateFields[] = "$field = :$field";
-                    if (isset($input[$field]) && !empty($input[$field]) && $input[$field] !== 'null' && $input[$field] !== '') {
-                        $params[":$field"] = (int)$input[$field];
-                    } else {
-                        $params[":$field"] = null;
-                    }
-                } elseif (in_array($field, ['battery_id', 'inverter_id'])) {
-                    // Handle battery_id and inverter_id - can be explicitly set to null
-                    $updateFields[] = "$field = :$field";
-                    if (isset($input[$field]) && !empty($input[$field]) && $input[$field] !== '' && $input[$field] !== 'null') {
-                        $params[":$field"] = (int)$input[$field];
-                    } else {
-                        $params[":$field"] = null;
-                    }
-                } else {
-                    $updateFields[] = "$field = :$field";
-                    $params[":$field"] = (isset($input[$field]) && $input[$field] !== '') ? $input[$field] : null;
-                }
-            }
-        }
-        
-        // Always update the updated_at timestamp
-        $updateFields[] = "updated_at = NOW()";
-        
-        if (empty($updateFields)) {
-            http_response_code(400);
-            echo json_encode([
-                'success' => false,
-                'message' => 'No fields to update'
-            ]);
-            return;
-        }
-        
-        // Update service order
-        $sql = "UPDATE service_orders SET " . implode(', ', $updateFields) . " WHERE id = :id";
-        
-        $stmt = $pdo->prepare($sql);
-        $stmt->execute($params);
-        
-        // Get updated service order with all details
-        $updatedService = getServiceOrderById($pdo, $id);
-        
-        // Commit transaction
-        $pdo->commit();
-        
-        echo json_encode([
-            'success' => true,
-            'message' => 'Service order updated successfully',
-            'data' => $updatedService
-        ]);
-        
-    } catch(PDOException $e) {
-        $pdo->rollBack();
-        http_response_code(500);
-        echo json_encode([
-            'success' => false,
-            'message' => 'Failed to update service order: ' . $e->getMessage(),
-            'error' => $e->getMessage(),
-            'debug' => [
-                'input' => $input,
-                'error_code' => $e->getCode()
-            ]
-        ]);
-    }
-}
-
-/**
- * Handle DELETE requests
- */
-function handleDeleteRequest($pdo) {
-    // Get ID from query parameters or input
-    $id = isset($_GET['id']) ? (int)$_GET['id'] : null;
-    
-    if (!$id) {
-        $input = getInputData();
-        $id = isset($input['id']) ? (int)$input['id'] : null;
-    }
-    
-    if (!$id || $id <= 0) {
-        http_response_code(400);
-        echo json_encode([
-            'success' => false,
-            'message' => 'Valid service order ID is required'
-        ]);
-        return;
-    }
-    
-    // Check if service order exists
-    $existingService = getServiceOrderById($pdo, $id);
-    if (!$existingService) {
-        http_response_code(404);
-        echo json_encode([
-            'success' => false,
-            'message' => 'Service order not found'
-        ]);
-        return;
-    }
-    
-    try {
-        // Begin transaction
-        $pdo->beginTransaction();
-        
-        // Delete the service order
-        $sql = "DELETE FROM service_orders WHERE id = ?";
-        $stmt = $pdo->prepare($sql);
-        $stmt->execute([$id]);
-        
-        // Check if delete was successful
-        if ($stmt->rowCount() > 0) {
-            // Commit transaction
-            $pdo->commit();
-            
-            echo json_encode([
-                'success' => true,
-                'message' => 'Service order deleted successfully'
-            ]);
-        } else {
-            throw new Exception('Failed to delete service order');
-        }
-        
-    } catch(Exception $e) {
-        $pdo->rollBack();
-        http_response_code(500);
-        echo json_encode([
-            'success' => false,
-            'message' => 'Failed to delete service order: ' . $e->getMessage(),
-            'error' => $e->getMessage()
-        ]);
-    }
-}
-
-/**
- * Helper Functions
- */
-
-/**
- * Get input data from request
- */
-function getInputData() {
-    $contentType = isset($_SERVER['CONTENT_TYPE']) ? $_SERVER['CONTENT_TYPE'] : '';
-    
+function getInputData(): array {
+    $contentType = $_SERVER['CONTENT_TYPE'] ?? '';
     if (strpos($contentType, 'application/json') !== false) {
         $input = json_decode(file_get_contents('php://input'), true);
-        // Handle JSON parsing errors
-        if (json_last_error() !== JSON_ERROR_NONE) {
-            return [];
-        }
-        return $input ?: [];
+        return (json_last_error() === JSON_ERROR_NONE && is_array($input)) ? $input : [];
     }
-    
-    // For form data or query string
     return $_POST ?: $_GET;
 }
 
-/**
- * Get service order by ID
- */
-function getServiceOrderById($pdo, $id) {
+function normalizeIdList($raw): array {
+    if ($raw === null || $raw === '' || $raw === 'null') return [];
+    if (is_string($raw)) {
+        $decoded = json_decode($raw, true);
+        if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
+            $raw = $decoded;
+        }
+    }
+    if (!is_array($raw)) {
+        $raw = [$raw];
+    }
+
+    $result = [];
+    foreach ($raw as $v) {
+        if ($v === null || $v === '' || $v === 'null') continue;
+        $id = (int)$v;
+        if ($id > 0) {
+            $result[$id] = $id;
+        }
+    }
+    return array_values($result);
+}
+
+function normalizeStatusValue($value, array $allowed, string $default): string {
+    $val = strtolower(trim((string)($value ?? '')));
+    if ($val === '' || !in_array($val, $allowed, true)) {
+        return $default;
+    }
+    return $val;
+}
+
+function extractSelectedIds(array $input, string $singleKey, string $multiKey): array {
+    $ids = normalizeIdList($input[$multiKey] ?? null);
+    if (empty($ids)) {
+        // Backward-compatible alias support
+        $aliasMulti = str_replace(['battery_ids', 'inverter_ids'], ['product_battery_ids', 'product_inverter_ids'], $multiKey);
+        if (isset($input[$aliasMulti])) {
+            $ids = normalizeIdList($input[$aliasMulti]);
+        }
+    }
+    if (empty($ids)) {
+        $aliasSingle = str_replace(['battery_id', 'inverter_id'], ['product_battery_id', 'product_inverter_id'], $singleKey);
+        if (isset($input[$aliasSingle])) {
+            $ids = normalizeIdList($input[$aliasSingle]);
+        }
+    }
+    if (empty($ids)) {
+        $ids = normalizeIdList($input[$singleKey] ?? null);
+    }
+    return $ids;
+}
+
+function toNullableInt($value): ?int {
+    if ($value === null || $value === '' || $value === 'null') return null;
+    $n = (int)$value;
+    return $n > 0 ? $n : null;
+}
+
+function assertExists(PDO $pdo, string $table, int $id, string $label): void {
+    $stmt = $pdo->prepare("SELECT id FROM {$table} WHERE id = ? LIMIT 1");
+    $stmt->execute([$id]);
+    if (!$stmt->fetch()) {
+        throw new RuntimeException("Invalid {$label}: {$id}");
+    }
+}
+
+function assertAllExist(PDO $pdo, string $table, array $ids, string $label): void {
+    if (empty($ids)) return;
+    $ph = implode(',', array_fill(0, count($ids), '?'));
+    $stmt = $pdo->prepare("SELECT id FROM {$table} WHERE id IN ({$ph})");
+    $stmt->execute($ids);
+    $found = array_map('intval', array_column($stmt->fetchAll(), 'id'));
+    $missing = array_values(array_diff($ids, $found));
+    if (!empty($missing)) {
+        throw new RuntimeException("Invalid {$label} id(s): " . implode(', ', $missing));
+    }
+}
+
+function getNextServiceCode(PDO $pdo): string {
+    $datePrefix = date('Ymd');
+    $stmt = $pdo->prepare("SELECT COALESCE(MAX(CAST(SUBSTRING(service_code, 14) AS UNSIGNED)), 0) + 1 AS next_no FROM service_orders WHERE service_code LIKE ?");
+    $stmt->execute(["SVC-{$datePrefix}-%"]);
+    $next = (int)($stmt->fetch()['next_no'] ?? 1);
+    return 'SVC-' . $datePrefix . '-' . str_pad((string)$next, 4, '0', STR_PAD_LEFT);
+}
+
+function saveServiceMappings(PDO $pdo, int $serviceId, array $batteryIds, array $inverterIds): void {
+    $pdo->prepare("DELETE FROM service_order_batteries WHERE service_order_id = ?")->execute([$serviceId]);
+    $pdo->prepare("DELETE FROM service_order_inverters WHERE service_order_id = ?")->execute([$serviceId]);
+
+    if (!empty($batteryIds)) {
+        $stmt = $pdo->prepare("INSERT INTO service_order_batteries (service_order_id, battery_id) VALUES (?, ?)");
+        foreach ($batteryIds as $bid) {
+            $stmt->execute([$serviceId, $bid]);
+        }
+    }
+
+    if (!empty($inverterIds)) {
+        $stmt = $pdo->prepare("INSERT INTO service_order_inverters (service_order_id, inverter_id) VALUES (?, ?)");
+        foreach ($inverterIds as $iid) {
+            $stmt->execute([$serviceId, $iid]);
+        }
+    }
+}
+
+function formatServiceRow(PDO $pdo, array $service): array {
+    $serviceId = (int)$service['id'];
+
+    $bStmt = $pdo->prepare("
+        SELECT b.id, b.battery_model, b.battery_serial, b.brand, b.capacity, b.voltage, b.battery_type
+        FROM service_order_batteries sob
+        JOIN batteries b ON b.id = sob.battery_id
+        WHERE sob.service_order_id = ?
+        ORDER BY sob.id ASC
+    ");
+    $bStmt->execute([$serviceId]);
+    $batteries = $bStmt->fetchAll();
+
+    $iStmt = $pdo->prepare("
+        SELECT i.id, i.inverter_model, i.inverter_serial, i.inverter_brand, i.power_rating, i.wave_type, i.battery_voltage
+        FROM service_order_inverters soi
+        JOIN inverters i ON i.id = soi.inverter_id
+        WHERE soi.service_order_id = ?
+        ORDER BY soi.id ASC
+    ");
+    $iStmt->execute([$serviceId]);
+    $inverters = $iStmt->fetchAll();
+
+    $service['battery_ids'] = array_map(fn($x) => (int)$x['id'], $batteries);
+    $service['inverter_ids'] = array_map(fn($x) => (int)$x['id'], $inverters);
+
+    if (empty($service['battery_ids']) && !empty($service['battery_ids_json'])) {
+        $decoded = json_decode((string)$service['battery_ids_json'], true);
+        if (is_array($decoded)) {
+            $service['battery_ids'] = normalizeIdList($decoded);
+        }
+    }
+    if (empty($service['inverter_ids']) && !empty($service['inverter_ids_json'])) {
+        $decoded = json_decode((string)$service['inverter_ids_json'], true);
+        if (is_array($decoded)) {
+            $service['inverter_ids'] = normalizeIdList($decoded);
+        }
+    }
+    $service['batteries'] = $batteries;
+    $service['inverters'] = $inverters;
+    $service['has_battery'] = !empty($service['battery_ids']);
+    $service['has_inverter'] = !empty($service['inverter_ids']);
+
+    if (!$service['has_battery'] && !empty($service['battery_id'])) {
+        $service['battery_ids'] = [(int)$service['battery_id']];
+        $service['has_battery'] = true;
+    }
+    if (!$service['has_inverter'] && !empty($service['inverter_id'])) {
+        $service['inverter_ids'] = [(int)$service['inverter_id']];
+        $service['has_inverter'] = true;
+    }
+
+    unset($service['battery_ids_json'], $service['inverter_ids_json']);
+    return $service;
+}
+
+function getServiceOrderBaseById(PDO $pdo, int $id): ?array {
     $sql = "
-        SELECT so.id, 
-               so.service_code, 
-               so.customer_id, 
-               so.customer_phone, 
-               so.battery_id, 
-               so.inverter_id,
-               so.service_staff_id, 
-               so.warranty_status, 
-               so.amc_status, 
-               so.notes, 
-               so.created_at, 
-               so.updated_at,
-               
-               -- Battery details
-               b.battery_model, 
-               b.battery_serial,
-               b.brand as battery_brand,
-               b.capacity as battery_capacity,
-               b.voltage as battery_voltage,
-               b.battery_type,
-               b.purchase_date as battery_purchase_date,
-               b.installation_date as battery_installation_date,
-               b.warranty_period as battery_warranty,
-               
-               -- Inverter details
-               i.inverter_model,
-               i.inverter_serial,
-               i.inverter_brand,
-               i.power_rating,
-               i.wave_type,
-               i.battery_voltage as inverter_battery_voltage,
-               i.purchase_date as inverter_purchase_date,
-               i.installation_date as inverter_installation_date,
-               i.warranty_period as inverter_warranty,
-               
-               -- Staff details
-               u.name as staff_name,
-               u.email as staff_email,
-               
-               -- Customer details
-               c.full_name as customer_name,
-               c.email as customer_email,
-               c.phone as customer_phone_number,
-               c.address as customer_address,
-               c.city as customer_city
-               
+        SELECT so.id, so.service_code, so.customer_id, so.customer_phone, so.battery_id, so.inverter_id,
+               so.battery_ids AS battery_ids_json, so.inverter_ids AS inverter_ids_json,
+               so.service_staff_id, so.warranty_status, so.amc_status, so.notes, so.created_at, so.updated_at,
+               u.name AS staff_name, u.email AS staff_email,
+               c.full_name AS customer_name, c.email AS customer_email, c.phone AS customer_phone_number,
+               c.address AS customer_address, c.city AS customer_city
         FROM service_orders so
-        LEFT JOIN batteries b ON so.battery_id = b.id
-        LEFT JOIN inverters i ON so.inverter_id = i.id
         LEFT JOIN users u ON so.service_staff_id = u.id
         LEFT JOIN customers c ON so.customer_id = c.id
         WHERE so.id = ?
     ";
-    
     $stmt = $pdo->prepare($sql);
     $stmt->execute([$id]);
-    $service = $stmt->fetch();
-    
-    if ($service) {
-        $service['has_battery'] = !is_null($service['battery_id']);
-        $service['has_inverter'] = !is_null($service['inverter_id']);
-    }
-    
-    return $service;
+    $row = $stmt->fetch();
+    return $row ?: null;
 }
 
-/**
- * Get service statistics
- */
-function getServiceStatistics($pdo) {
-    $stats = [];
-    
-    try {
-        // Total service orders
-        $sql = "SELECT COUNT(*) as total FROM service_orders";
-        $stmt = $pdo->query($sql);
-        $stats['total'] = $stmt->fetch()['total'];
-        
-        // By warranty status
-        $sql = "SELECT warranty_status, COUNT(*) as count FROM service_orders GROUP BY warranty_status";
-        $stmt = $pdo->query($sql);
-        $stats['by_warranty'] = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
-        
-        // By AMC status
-        $sql = "SELECT amc_status, COUNT(*) as count FROM service_orders GROUP BY amc_status";
-        $stmt = $pdo->query($sql);
-        $stats['by_amc'] = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
-        
-        // Equipment usage statistics (including nulls)
-        $sql = "SELECT 
-                CASE 
-                    WHEN battery_id IS NOT NULL AND inverter_id IS NOT NULL THEN 'Both'
-                    WHEN battery_id IS NOT NULL THEN 'Battery Only'
-                    WHEN inverter_id IS NOT NULL THEN 'Inverter Only'
-                    ELSE 'No Equipment'
-                END as equipment_type,
-                COUNT(*) as count 
-                FROM service_orders 
-                GROUP BY equipment_type";
-        $stmt = $pdo->query($sql);
-        $stats['equipment_usage'] = $stmt->fetchAll();
-        
-        // Recent activity - last 7 days
-        $sql = "SELECT DATE(created_at) as date, COUNT(*) as count 
-                FROM service_orders 
-                WHERE created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)
-                GROUP BY DATE(created_at)
-                ORDER BY date DESC";
-        $stmt = $pdo->query($sql);
-        $stats['recent'] = $stmt->fetchAll();
-        
-    } catch(PDOException $e) {
-        error_log("Statistics error: " . $e->getMessage());
-        $stats = [
-            'total' => 0,
-            'by_warranty' => [],
-            'by_amc' => [],
-            'equipment_usage' => [],
-            'recent' => []
-        ];
+function getServiceOrderById(PDO $pdo, int $id): ?array {
+    $base = getServiceOrderBaseById($pdo, $id);
+    return $base ? formatServiceRow($pdo, $base) : null;
+}
+
+function handleGetRequest(PDO $pdo): void {
+    $params = $_GET;
+    $id = isset($params['id']) ? (int)$params['id'] : null;
+    if ($id) {
+        $service = getServiceOrderById($pdo, $id);
+        if (!$service) {
+            http_response_code(404);
+            echo json_encode(['success' => false, 'message' => 'Service order not found']);
+            return;
+        }
+        echo json_encode(['success' => true, 'data' => $service]);
+        return;
     }
-    
-    return $stats;
+
+    $where = [];
+    $qp = [];
+
+    if (!empty($params['customer_id'])) {
+        $where[] = 'so.customer_id = ?';
+        $qp[] = (int)$params['customer_id'];
+    }
+    if (!empty($params['staff_id'])) {
+        $where[] = 'so.service_staff_id = ?';
+        $qp[] = (int)$params['staff_id'];
+    }
+    if (isset($params['battery_id']) && $params['battery_id'] !== '' && $params['battery_id'] !== 'null') {
+        $where[] = "EXISTS (SELECT 1 FROM service_order_batteries sob WHERE sob.service_order_id = so.id AND sob.battery_id = ?)";
+        $qp[] = (int)$params['battery_id'];
+    }
+    if (isset($params['inverter_id']) && $params['inverter_id'] !== '' && $params['inverter_id'] !== 'null') {
+        $where[] = "EXISTS (SELECT 1 FROM service_order_inverters soi WHERE soi.service_order_id = so.id AND soi.inverter_id = ?)";
+        $qp[] = (int)$params['inverter_id'];
+    }
+    if (!empty($params['warranty_status'])) {
+        $where[] = 'so.warranty_status = ?';
+        $qp[] = $params['warranty_status'];
+    }
+    if (!empty($params['amc_status'])) {
+        $where[] = 'so.amc_status = ?';
+        $qp[] = $params['amc_status'];
+    }
+    if (!empty($params['start_date'])) {
+        $where[] = 'DATE(so.created_at) >= ?';
+        $qp[] = $params['start_date'];
+    }
+    if (!empty($params['end_date'])) {
+        $where[] = 'DATE(so.created_at) <= ?';
+        $qp[] = $params['end_date'];
+    }
+    if (!empty($params['search'])) {
+        $like = '%' . $params['search'] . '%';
+        $where[] = "(so.service_code LIKE ? OR so.notes LIKE ? OR c.full_name LIKE ? OR so.customer_phone LIKE ?)";
+        $qp[] = $like;
+        $qp[] = $like;
+        $qp[] = $like;
+        $qp[] = $like;
+    }
+
+    $whereSql = empty($where) ? '' : 'WHERE ' . implode(' AND ', $where);
+    $limit = isset($params['limit']) ? max(1, (int)$params['limit']) : 50;
+    $page = isset($params['page']) ? max(1, (int)$params['page']) : 1;
+    $offset = ($page - 1) * $limit;
+
+    $countStmt = $pdo->prepare("SELECT COUNT(*) total FROM service_orders so LEFT JOIN customers c ON c.id = so.customer_id $whereSql");
+    $countStmt->execute($qp);
+    $total = (int)$countStmt->fetch()['total'];
+
+    $sql = "
+        SELECT so.id, so.service_code, so.customer_id, so.customer_phone, so.battery_id, so.inverter_id,
+               so.battery_ids AS battery_ids_json, so.inverter_ids AS inverter_ids_json,
+               so.service_staff_id, so.warranty_status, so.amc_status, so.notes, so.created_at, so.updated_at,
+               u.name AS staff_name, u.email AS staff_email,
+               c.full_name AS customer_name, c.email AS customer_email, c.phone AS customer_phone_number,
+               c.address AS customer_address, c.city AS customer_city
+        FROM service_orders so
+        LEFT JOIN users u ON so.service_staff_id = u.id
+        LEFT JOIN customers c ON so.customer_id = c.id
+        $whereSql
+        ORDER BY so.created_at DESC
+        LIMIT ? OFFSET ?
+    ";
+    $stmt = $pdo->prepare($sql);
+    $exec = $qp;
+    $exec[] = $limit;
+    $exec[] = $offset;
+    $stmt->execute($exec);
+    $rows = $stmt->fetchAll();
+
+    foreach ($rows as &$row) {
+        $row = formatServiceRow($pdo, $row);
+    }
+
+    echo json_encode([
+        'success' => true,
+        'data' => $rows,
+        'pagination' => [
+            'total' => $total,
+            'page' => $page,
+            'limit' => $limit,
+            'total_pages' => $limit > 0 ? (int)ceil($total / $limit) : 1
+        ]
+    ]);
+}
+
+function handlePostRequest(PDO $pdo): void {
+    $input = getInputData();
+    if (empty($input['customer_id'])) {
+        http_response_code(400);
+        echo json_encode(['success' => false, 'message' => 'customer_id is required']);
+        return;
+    }
+
+    $batteryIds = extractSelectedIds($input, 'battery_id', 'battery_ids');
+    $inverterIds = extractSelectedIds($input, 'inverter_id', 'inverter_ids');
+    $primaryBatteryId = $batteryIds[0] ?? null;
+    $primaryInverterId = $inverterIds[0] ?? null;
+
+    try {
+        $pdo->beginTransaction();
+
+        $customerId = (int)$input['customer_id'];
+        assertExists($pdo, 'customers', $customerId, 'customer_id');
+
+        $serviceStaffId = toNullableInt($input['service_staff_id'] ?? null);
+        if ($serviceStaffId !== null) {
+            assertExists($pdo, 'users', $serviceStaffId, 'service_staff_id');
+        }
+
+        assertAllExist($pdo, 'batteries', $batteryIds, 'battery');
+        assertAllExist($pdo, 'inverters', $inverterIds, 'inverter');
+
+        $customerPhone = $input['customer_phone'] ?? null;
+        if (empty($customerPhone)) {
+            $cstmt = $pdo->prepare("SELECT phone FROM customers WHERE id = ?");
+            $cstmt->execute([$customerId]);
+            $c = $cstmt->fetch();
+            $customerPhone = $c['phone'] ?? null;
+        }
+
+        $serviceCode = getNextServiceCode($pdo);
+
+        $stmt = $pdo->prepare("
+            INSERT INTO service_orders (
+                service_code, customer_id, customer_phone, battery_id, inverter_id, battery_ids, inverter_ids, service_staff_id,
+                warranty_status, amc_status, notes, created_at, updated_at
+            ) VALUES (
+                :service_code, :customer_id, :customer_phone, :battery_id, :inverter_id, :battery_ids, :inverter_ids, :service_staff_id,
+                :warranty_status, :amc_status, :notes, NOW(), NOW()
+            )
+        ");
+        $stmt->execute([
+            ':service_code' => $serviceCode,
+            ':customer_id' => $customerId,
+            ':customer_phone' => $customerPhone,
+            ':battery_id' => $primaryBatteryId,
+            ':inverter_id' => $primaryInverterId,
+            ':battery_ids' => json_encode($batteryIds),
+            ':inverter_ids' => json_encode($inverterIds),
+            ':service_staff_id' => $serviceStaffId,
+            ':warranty_status' => normalizeStatusValue(
+                $input['warranty_status'] ?? null,
+                ['in_warranty', 'extended_warranty', 'out_of_warranty'],
+                'out_of_warranty'
+            ),
+            ':amc_status' => normalizeStatusValue(
+                $input['amc_status'] ?? null,
+                ['active', 'expired', 'no_amc'],
+                'no_amc'
+            ),
+            ':notes' => isset($input['notes']) ? trim((string)$input['notes']) : null
+        ]);
+
+        $serviceId = (int)$pdo->lastInsertId();
+        saveServiceMappings($pdo, $serviceId, $batteryIds, $inverterIds);
+        $service = getServiceOrderById($pdo, $serviceId);
+
+        $pdo->commit();
+        http_response_code(201);
+        echo json_encode([
+            'success' => true,
+            'message' => 'Service order created successfully',
+            'service_id' => $serviceId,
+            'service_code' => $serviceCode,
+            'data' => $service
+        ]);
+    } catch (Exception $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        http_response_code(500);
+        echo json_encode(['success' => false, 'message' => 'Failed to create service order', 'error' => $e->getMessage()]);
+    }
+}
+
+function handlePutRequest(PDO $pdo): void {
+    $input = getInputData();
+    $id = !empty($input['id']) ? (int)$input['id'] : (!empty($_GET['id']) ? (int)$_GET['id'] : 0);
+    if ($id <= 0) {
+        http_response_code(400);
+        echo json_encode(['success' => false, 'message' => 'Service order ID is required']);
+        return;
+    }
+
+    $existing = getServiceOrderById($pdo, $id);
+    if (!$existing) {
+        http_response_code(404);
+        echo json_encode(['success' => false, 'message' => 'Service order not found']);
+        return;
+    }
+
+    try {
+        $pdo->beginTransaction();
+
+        $batteryIds = array_key_exists('battery_ids', $input) || array_key_exists('battery_id', $input)
+            ? extractSelectedIds($input, 'battery_id', 'battery_ids')
+            : $existing['battery_ids'];
+        $inverterIds = array_key_exists('inverter_ids', $input) || array_key_exists('inverter_id', $input)
+            ? extractSelectedIds($input, 'inverter_id', 'inverter_ids')
+            : $existing['inverter_ids'];
+
+        if (array_key_exists('customer_id', $input) && toNullableInt($input['customer_id']) !== null) {
+            assertExists($pdo, 'customers', (int)$input['customer_id'], 'customer_id');
+        }
+
+        if (array_key_exists('service_staff_id', $input)) {
+            $staffId = toNullableInt($input['service_staff_id']);
+            if ($staffId !== null) {
+                assertExists($pdo, 'users', $staffId, 'service_staff_id');
+            }
+        }
+
+        assertAllExist($pdo, 'batteries', $batteryIds, 'battery');
+        assertAllExist($pdo, 'inverters', $inverterIds, 'inverter');
+
+        $fields = [];
+        $params = [':id' => $id];
+
+        $updatable = ['customer_id', 'customer_phone', 'service_staff_id', 'warranty_status', 'amc_status', 'notes'];
+        foreach ($updatable as $field) {
+            if (array_key_exists($field, $input)) {
+                $fields[] = "$field = :$field";
+                if (in_array($field, ['customer_id', 'service_staff_id'], true)) {
+                    $params[":$field"] = toNullableInt($input[$field]);
+                } elseif ($field === 'warranty_status') {
+                    $params[":$field"] = normalizeStatusValue(
+                        $input[$field],
+                        ['in_warranty', 'extended_warranty', 'out_of_warranty'],
+                        'out_of_warranty'
+                    );
+                } elseif ($field === 'amc_status') {
+                    $params[":$field"] = normalizeStatusValue(
+                        $input[$field],
+                        ['active', 'expired', 'no_amc'],
+                        'no_amc'
+                    );
+                } else {
+                    $params[":$field"] = ($input[$field] === '') ? null : $input[$field];
+                }
+            }
+        }
+
+        $fields[] = 'battery_id = :battery_id';
+        $fields[] = 'inverter_id = :inverter_id';
+        $fields[] = 'battery_ids = :battery_ids';
+        $fields[] = 'inverter_ids = :inverter_ids';
+        $fields[] = 'updated_at = NOW()';
+        $params[':battery_id'] = $batteryIds[0] ?? null;
+        $params[':inverter_id'] = $inverterIds[0] ?? null;
+        $params[':battery_ids'] = json_encode($batteryIds);
+        $params[':inverter_ids'] = json_encode($inverterIds);
+
+        $sql = 'UPDATE service_orders SET ' . implode(', ', $fields) . ' WHERE id = :id';
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute($params);
+
+        saveServiceMappings($pdo, $id, $batteryIds, $inverterIds);
+        $updated = getServiceOrderById($pdo, $id);
+
+        $pdo->commit();
+        echo json_encode(['success' => true, 'message' => 'Service order updated successfully', 'data' => $updated]);
+    } catch (Exception $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        http_response_code(500);
+        echo json_encode(['success' => false, 'message' => 'Failed to update service order', 'error' => $e->getMessage()]);
+    }
+}
+
+function handleDeleteRequest(PDO $pdo): void {
+    $id = isset($_GET['id']) ? (int)$_GET['id'] : 0;
+    if ($id <= 0) {
+        $input = getInputData();
+        $id = isset($input['id']) ? (int)$input['id'] : 0;
+    }
+    if ($id <= 0) {
+        http_response_code(400);
+        echo json_encode(['success' => false, 'message' => 'Valid service order ID is required']);
+        return;
+    }
+
+    try {
+        $pdo->beginTransaction();
+        $pdo->prepare('DELETE FROM service_orders WHERE id = ?')->execute([$id]);
+        $pdo->commit();
+        echo json_encode(['success' => true, 'message' => 'Service order deleted successfully']);
+    } catch (Exception $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        http_response_code(500);
+        echo json_encode(['success' => false, 'message' => 'Failed to delete service order', 'error' => $e->getMessage()]);
+    }
 }
 ?>
+
+
