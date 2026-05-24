@@ -28,6 +28,7 @@ if (!$db) {
 }
 
 ensureBatteryIdColumn($db);
+ensureServiceStaffColumn($db);
 
 // Get request method
 $request_method = $_SERVER['REQUEST_METHOD'];
@@ -69,6 +70,66 @@ function handleGetRequest($db, $id) {
     // Check if it's a special action
     if(isset($_GET['action'])) {
         switch($_GET['action']) {
+            case 'staff_list':
+                $query = "SELECT id, name, email, role
+                          FROM users
+                          WHERE is_active = 1
+                          ORDER BY name ASC";
+                $stmt = $db->prepare($query);
+                $stmt->execute();
+                $records = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+                http_response_code(200);
+                echo json_encode(array(
+                    "success" => true,
+                    "records" => $records
+                ));
+                break;
+
+            case 'staff_monthly_summary':
+                $month = isset($_GET['month']) && preg_match('/^\d{4}-\d{2}$/', $_GET['month'])
+                    ? $_GET['month']
+                    : date('Y-m');
+
+                $detailsQuery = "SELECT ws.id, ws.service_id, ws.amount, ws.service_date, ws.notes, ws.created_at,
+                                        ws.service_staff_id,
+                                        u.name AS service_staff_name,
+                                        so.service_code,
+                                        c.full_name AS customer_name
+                                 FROM water_services ws
+                                 LEFT JOIN users u ON ws.service_staff_id = u.id
+                                 LEFT JOIN service_orders so ON ws.service_id = so.id
+                                 LEFT JOIN customers c ON ws.customer_id = c.id
+                                 WHERE DATE_FORMAT(ws.service_date, '%Y-%m') = :month
+                                 ORDER BY ws.service_date DESC, ws.id DESC";
+                $detailsStmt = $db->prepare($detailsQuery);
+                $detailsStmt->bindParam(':month', $month);
+                $detailsStmt->execute();
+                $payments = $detailsStmt->fetchAll(PDO::FETCH_ASSOC);
+
+                $summaryQuery = "SELECT ws.service_staff_id,
+                                        COALESCE(u.name, 'Unassigned') AS service_staff_name,
+                                        COUNT(ws.id) AS service_count,
+                                        COALESCE(SUM(ws.amount), 0) AS total_amount
+                                 FROM water_services ws
+                                 LEFT JOIN users u ON ws.service_staff_id = u.id
+                                 WHERE DATE_FORMAT(ws.service_date, '%Y-%m') = :month
+                                 GROUP BY ws.service_staff_id, u.name
+                                 ORDER BY total_amount DESC, service_count DESC";
+                $summaryStmt = $db->prepare($summaryQuery);
+                $summaryStmt->bindParam(':month', $month);
+                $summaryStmt->execute();
+                $summary = $summaryStmt->fetchAll(PDO::FETCH_ASSOC);
+
+                http_response_code(200);
+                echo json_encode(array(
+                    "success" => true,
+                    "month" => $month,
+                    "summary" => $summary,
+                    "payments" => $payments
+                ));
+                break;
+
             case 'total':
                 // Get total amount by date range
                 if(isset($_GET['start_date']) && isset($_GET['end_date'])) {
@@ -191,10 +252,11 @@ function handleGetRequest($db, $id) {
         // Get all water services with customer info
         if(isset($_GET['service_id']) && $_GET['service_id'] !== '') {
             $service_id = intval($_GET['service_id']);
-            $query = "SELECT ws.*, c.full_name as customer_name, b.battery_model as battery_name
+            $query = "SELECT ws.*, c.full_name as customer_name, b.battery_model as battery_name, u.name as service_staff_name
                       FROM water_services ws
                       LEFT JOIN customers c ON ws.customer_id = c.id
                       LEFT JOIN batteries b ON ws.battery_id = b.id
+                      LEFT JOIN users u ON ws.service_staff_id = u.id
                       WHERE ws.service_id = :service_id
                       ORDER BY ws.service_date DESC";
             $stmt = $db->prepare($query);
@@ -204,10 +266,11 @@ function handleGetRequest($db, $id) {
             $keywords = htmlspecialchars(strip_tags($keywords));
             $keywords = "%{$keywords}%";
             
-            $query = "SELECT ws.*, c.full_name as customer_name, b.battery_model as battery_name
+            $query = "SELECT ws.*, c.full_name as customer_name, b.battery_model as battery_name, u.name as service_staff_name
                       FROM water_services ws
                       LEFT JOIN customers c ON ws.customer_id = c.id
                       LEFT JOIN batteries b ON ws.battery_id = b.id
+                      LEFT JOIN users u ON ws.service_staff_id = u.id
                       WHERE ws.notes LIKE :keywords 
                          OR ws.amount LIKE :keywords 
                          OR ws.service_date LIKE :keywords
@@ -218,13 +281,22 @@ function handleGetRequest($db, $id) {
             $stmt = $db->prepare($query);
             $stmt->bindParam(":keywords", $keywords);
         } else {
-            $query = "SELECT ws.*, c.full_name as customer_name, b.battery_model as battery_name
+            $query = "SELECT ws.*, c.full_name as customer_name, b.battery_model as battery_name, u.name as service_staff_name
                       FROM water_services ws
                       LEFT JOIN customers c ON ws.customer_id = c.id
                       LEFT JOIN batteries b ON ws.battery_id = b.id
-                      ORDER BY ws.service_date DESC";
+                      LEFT JOIN users u ON ws.service_staff_id = u.id";
+
+            if (isset($_GET['month']) && preg_match('/^\d{4}-\d{2}$/', $_GET['month'])) {
+                $query .= " WHERE DATE_FORMAT(ws.service_date, '%Y-%m') = :month";
+            }
+
+            $query .= " ORDER BY ws.service_date DESC";
             
             $stmt = $db->prepare($query);
+            if (isset($_GET['month']) && preg_match('/^\d{4}-\d{2}$/', $_GET['month'])) {
+                $stmt->bindParam(":month", $_GET['month']);
+            }
         }
         
         $stmt->execute();
@@ -247,6 +319,8 @@ function handleGetRequest($db, $id) {
                     "customer_name" => $row['customer_name'] ?? null
                     ,"battery_id" => isset($row['battery_id']) ? intval($row['battery_id']) : null
                     ,"battery_name" => $row['battery_name'] ?? null
+                    ,"service_staff_id" => isset($row['service_staff_id']) ? intval($row['service_staff_id']) : null
+                    ,"service_staff_name" => $row['service_staff_name'] ?? null
                 );
                 
                 array_push($water_services_arr["records"], $water_service_item);
@@ -346,13 +420,14 @@ function handlePostRequest($db, $data) {
     $service_date = htmlspecialchars(strip_tags($data->service_date));
     $notes = isset($data->notes) ? htmlspecialchars(strip_tags($data->notes)) : null;
     $created_by = isset($data->created_by) ? htmlspecialchars(strip_tags($data->created_by)) : 1;
+    $service_staff_id = isset($data->service_staff_id) && $data->service_staff_id !== '' ? intval($data->service_staff_id) : null;
     $created_at = date('Y-m-d H:i:s');
     
     try {
         $query = "INSERT INTO water_services
-                  (service_id, customer_id, battery_id, amount, service_date, notes, created_by, created_at)
+                  (service_id, customer_id, battery_id, amount, service_date, notes, created_by, service_staff_id, created_at)
                   VALUES
-                  (:service_id, :customer_id, :battery_id, :amount, :service_date, :notes, :created_by, :created_at)";
+                  (:service_id, :customer_id, :battery_id, :amount, :service_date, :notes, :created_by, :service_staff_id, :created_at)";
         
         $stmt = $db->prepare($query);
         
@@ -364,16 +439,18 @@ function handlePostRequest($db, $data) {
         $stmt->bindParam(":service_date", $service_date);
         $stmt->bindParam(":notes", $notes);
         $stmt->bindParam(":created_by", $created_by);
+        $stmt->bindParam(":service_staff_id", $service_staff_id);
         $stmt->bindParam(":created_at", $created_at);
         
         if($stmt->execute()) {
             $new_id = $db->lastInsertId();
             
             // Get the created record
-            $select_query = "SELECT ws.*, c.full_name as customer_name, b.battery_model as battery_name
+            $select_query = "SELECT ws.*, c.full_name as customer_name, b.battery_model as battery_name, u.name as service_staff_name
                             FROM water_services ws
                             LEFT JOIN customers c ON ws.customer_id = c.id
                             LEFT JOIN batteries b ON ws.battery_id = b.id
+                            LEFT JOIN users u ON ws.service_staff_id = u.id
                             WHERE ws.id = :id";
             
             $select_stmt = $db->prepare($select_query);
@@ -393,6 +470,8 @@ function handlePostRequest($db, $data) {
                 "customer_name" => $new_record['customer_name'] ?? null
                 ,"battery_id" => isset($new_record['battery_id']) ? intval($new_record['battery_id']) : null
                 ,"battery_name" => $new_record['battery_name'] ?? null
+                ,"service_staff_id" => isset($new_record['service_staff_id']) ? intval($new_record['service_staff_id']) : null
+                ,"service_staff_name" => $new_record['service_staff_name'] ?? null
             );
             
             http_response_code(201);
@@ -506,6 +585,7 @@ function handlePutRequest($db, $id, $data) {
     $amount = isset($data->amount) ? floatval($data->amount) : $current['amount'];
     $service_date = isset($data->service_date) ? htmlspecialchars(strip_tags($data->service_date)) : $current['service_date'];
     $notes = isset($data->notes) ? htmlspecialchars(strip_tags($data->notes)) : $current['notes'];
+    $service_staff_id = isset($data->service_staff_id) ? intval($data->service_staff_id) : (isset($current['service_staff_id']) ? intval($current['service_staff_id']) : null);
     
     try {
         $query = "UPDATE water_services
@@ -515,7 +595,8 @@ function handlePutRequest($db, $id, $data) {
                     battery_id = :battery_id,
                     amount = :amount,
                     service_date = :service_date,
-                    notes = :notes
+                    notes = :notes,
+                    service_staff_id = :service_staff_id
                   WHERE id = :id";
         
         $stmt = $db->prepare($query);
@@ -527,14 +608,16 @@ function handlePutRequest($db, $id, $data) {
         $stmt->bindParam(":amount", $amount);
         $stmt->bindParam(":service_date", $service_date);
         $stmt->bindParam(":notes", $notes);
+        $stmt->bindParam(":service_staff_id", $service_staff_id);
         $stmt->bindParam(":id", $id);
         
         if($stmt->execute()) {
             // Get the updated record
-            $select_query = "SELECT ws.*, c.full_name as customer_name, b.battery_model as battery_name
+            $select_query = "SELECT ws.*, c.full_name as customer_name, b.battery_model as battery_name, u.name as service_staff_name
                             FROM water_services ws
                             LEFT JOIN customers c ON ws.customer_id = c.id
                             LEFT JOIN batteries b ON ws.battery_id = b.id
+                            LEFT JOIN users u ON ws.service_staff_id = u.id
                             WHERE ws.id = :id";
             
             $select_stmt = $db->prepare($select_query);
@@ -554,6 +637,8 @@ function handlePutRequest($db, $id, $data) {
                 "customer_name" => $updated_record['customer_name'] ?? null
                 ,"battery_id" => isset($updated_record['battery_id']) ? intval($updated_record['battery_id']) : null
                 ,"battery_name" => $updated_record['battery_name'] ?? null
+                ,"service_staff_id" => isset($updated_record['service_staff_id']) ? intval($updated_record['service_staff_id']) : null
+                ,"service_staff_name" => $updated_record['service_staff_name'] ?? null
             );
             
             http_response_code(200);
@@ -640,6 +725,14 @@ function handleDeleteRequest($db, $id) {
 function ensureBatteryIdColumn($db) {
     try {
         $db->exec("ALTER TABLE water_services ADD COLUMN battery_id INT NULL AFTER customer_id");
+    } catch (PDOException $e) {
+        // already exists
+    }
+}
+
+function ensureServiceStaffColumn($db) {
+    try {
+        $db->exec("ALTER TABLE water_services ADD COLUMN service_staff_id INT NULL AFTER created_by");
     } catch (PDOException $e) {
         // already exists
     }
