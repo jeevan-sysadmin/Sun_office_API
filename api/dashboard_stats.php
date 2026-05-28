@@ -82,6 +82,11 @@ echo json_encode($response, JSON_PRETTY_PRINT);
  */
 function getSummaryStats($db) {
     $stats = [];
+    $selectedYear = isset($_GET['year']) ? intval($_GET['year']) : intval(date('Y'));
+    $selectedMonth = isset($_GET['month']) ? intval($_GET['month']) : intval(date('m'));
+    if ($selectedMonth < 1 || $selectedMonth > 12) {
+        $selectedMonth = intval(date('m'));
+    }
     
     // Get total customers
     $query = "SELECT COUNT(*) as total FROM customers WHERE 1";
@@ -92,52 +97,74 @@ function getSummaryStats($db) {
     $query = "SELECT COUNT(*) as total FROM batteries WHERE 1";
     $stmt = $db->query($query);
     $stats['total_batteries'] = $stmt->fetch(PDO::FETCH_ASSOC)['total'];
+
+    // Get total inverters
+    $query = "SELECT COUNT(*) as total FROM inverters WHERE 1";
+    $stmt = $db->query($query);
+    $stats['total_inverters'] = $stmt->fetch(PDO::FETCH_ASSOC)['total'];
     
     // Get active batteries
-    $query = "SELECT COUNT(*) as total FROM batteries WHERE status = 'active'";
+    // Some DBs do not have `status` column in `batteries`, so use total as safe fallback.
+    $query = "SELECT COUNT(*) as total FROM batteries";
     $stmt = $db->query($query);
     $stats['active_batteries'] = $stmt->fetch(PDO::FETCH_ASSOC)['total'];
-    
-    // Get total service orders
-    $query = "SELECT COUNT(*) as total FROM service_orders WHERE 1";
+
+    // Get active inverters
+    // Some DBs do not have `status` column in `inverters`, so use total as safe fallback.
+    $query = "SELECT COUNT(*) as total FROM inverters";
     $stmt = $db->query($query);
-    $stats['total_services'] = $stmt->fetch(PDO::FETCH_ASSOC)['total'];
+    $stats['active_inverters'] = $stmt->fetch(PDO::FETCH_ASSOC)['total'];
     
-    // Get pending services (services created in last 7 days without water service)
-    $query = "SELECT COUNT(DISTINCT so.id) as total 
-              FROM service_orders so
-              LEFT JOIN water_services ws ON so.id = ws.service_id
-              WHERE so.created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)
-              AND ws.id IS NULL";
+    // Get total service orders (battery + inverter services)
+    $query = "SELECT 
+                (SELECT COUNT(*) FROM service_orders) + 
+                (SELECT COUNT(*) FROM inverter_services) AS total";
     $stmt = $db->query($query);
-    $stats['pending_services'] = $stmt->fetch(PDO::FETCH_ASSOC)['total'];
+    $stats['total_services'] = intval($stmt->fetch(PDO::FETCH_ASSOC)['total'] ?? 0);
+    
+    // Get pending services from both modules (schema-safe using recent open workload)
+    $query = "SELECT
+                (SELECT COUNT(*) FROM service_orders WHERE created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)) +
+                (SELECT COUNT(*) FROM inverter_services WHERE created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)) AS total";
+    $stmt = $db->query($query);
+    $stats['pending_services'] = intval($stmt->fetch(PDO::FETCH_ASSOC)['total'] ?? 0);
     
     // Get total users (staff)
     $query = "SELECT COUNT(*) as total FROM users WHERE is_active = 1";
     $stmt = $db->query($query);
     $stats['total_staff'] = $stmt->fetch(PDO::FETCH_ASSOC)['total'];
     
-    // Get total water services amount (current month)
-    $query = "SELECT COALESCE(SUM(amount), 0) as total 
-              FROM water_services 
-              WHERE MONTH(created_at) = MONTH(CURRENT_DATE())
-              AND YEAR(created_at) = YEAR(CURRENT_DATE())";
-    $stmt = $db->query($query);
-    $stats['monthly_revenue'] = (float)$stmt->fetch(PDO::FETCH_ASSOC)['total'];
+    // Get monthly revenue (water payments + paid inverter services)
+    $query = "SELECT
+                COALESCE((SELECT SUM(amount) FROM water_services WHERE MONTH(service_date) = :month1 AND YEAR(service_date) = :year1), 0) +
+                COALESCE((SELECT SUM(final_cost) FROM inverter_services WHERE LOWER(COALESCE(payment_status, 'pending')) = 'paid' AND MONTH(created_at) = :month2 AND YEAR(created_at) = :year2), 0)
+                AS total";
+    $stmt = $db->prepare($query);
+    $stmt->bindValue(':month1', $selectedMonth, PDO::PARAM_INT);
+    $stmt->bindValue(':year1', $selectedYear, PDO::PARAM_INT);
+    $stmt->bindValue(':month2', $selectedMonth, PDO::PARAM_INT);
+    $stmt->bindValue(':year2', $selectedYear, PDO::PARAM_INT);
+    $stmt->execute();
+    $stats['monthly_revenue'] = (float)($stmt->fetch(PDO::FETCH_ASSOC)['total'] ?? 0);
     
-    // Get total expenses (current month)
+    // Get total expenses (selected month)
     $query = "SELECT COALESCE(SUM(amount), 0) as total 
               FROM expenses 
-              WHERE MONTH(expense_date) = MONTH(CURRENT_DATE())
-              AND YEAR(expense_date) = YEAR(CURRENT_DATE())";
-    $stmt = $db->query($query);
+              WHERE MONTH(expense_date) = :month
+              AND YEAR(expense_date) = :year";
+    $stmt = $db->prepare($query);
+    $stmt->bindValue(':month', $selectedMonth, PDO::PARAM_INT);
+    $stmt->bindValue(':year', $selectedYear, PDO::PARAM_INT);
+    $stmt->execute();
     $stats['monthly_expenses'] = (float)$stmt->fetch(PDO::FETCH_ASSOC)['total'];
     
-    // Get total salary paid (current month)
+    // Get total salary paid (selected month)
     $query = "SELECT COALESCE(SUM(net_amount), 0) as total 
               FROM salary 
-              WHERE salary_month = DATE_FORMAT(CURRENT_DATE(), '%Y-%m')";
-    $stmt = $db->query($query);
+              WHERE salary_month = :salary_month";
+    $stmt = $db->prepare($query);
+    $stmt->bindValue(':salary_month', sprintf('%04d-%02d', $selectedYear, $selectedMonth), PDO::PARAM_STR);
+    $stmt->execute();
     $stats['monthly_salary'] = (float)$stmt->fetch(PDO::FETCH_ASSOC)['total'];
     
     // Calculate net profit
@@ -154,6 +181,19 @@ function getSummaryStats($db) {
     $stats['battery_conditions'] = [];
     while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
         $stats['battery_conditions'][$row['battery_condition']] = (int)$row['count'];
+    }
+
+    // Get inverter condition distribution
+    $query = "SELECT 
+                inverter_condition,
+                COUNT(*) as count
+              FROM inverters
+              WHERE inverter_condition IS NOT NULL
+              GROUP BY inverter_condition";
+    $stmt = $db->query($query);
+    $stats['inverter_conditions'] = [];
+    while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+        $stats['inverter_conditions'][$row['inverter_condition']] = (int)$row['count'];
     }
     
     // Get warranty status distribution

@@ -220,20 +220,6 @@ function handlePostCustomer($conn) {
     $notes = !empty($data['notes']) ? trim($data['notes']) : null;
     
     try {
-        // Check if phone already exists
-        $checkSql = "SELECT id FROM customers WHERE phone = :phone";
-        $checkStmt = $conn->prepare($checkSql);
-        $checkStmt->bindParam(':phone', $phone);
-        $checkStmt->execute();
-        
-        if ($checkStmt->rowCount() > 0) {
-            echo json_encode([
-                'success' => false,
-                'message' => 'Customer with this phone number already exists'
-            ]);
-            return;
-        }
-        
         // Generate customer code
         $customer_code = generateCustomerCode($conn);
         
@@ -352,23 +338,6 @@ function handlePutCustomer($conn) {
         }
         
         $existingCustomer = $checkStmt->fetch(PDO::FETCH_ASSOC);
-        
-        // Check if phone already exists for another customer
-        if ($phone !== $existingCustomer['phone']) {
-            $phoneCheckSql = "SELECT id FROM customers WHERE phone = :phone AND id != :id";
-            $phoneCheckStmt = $conn->prepare($phoneCheckSql);
-            $phoneCheckStmt->bindParam(':phone', $phone);
-            $phoneCheckStmt->bindParam(':id', $id);
-            $phoneCheckStmt->execute();
-            
-            if ($phoneCheckStmt->rowCount() > 0) {
-                echo json_encode([
-                    'success' => false,
-                    'message' => 'Phone number already used by another customer'
-                ]);
-                return;
-            }
-        }
         
         // Update customer with alternate_phone
         $sql = "UPDATE customers SET 

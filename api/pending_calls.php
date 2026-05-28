@@ -8,8 +8,8 @@
  * Steps:
  * 1. Get customers from specified city
  * 2. Filter customers with active service orders (amc_status = 'active')
- * 3. Check if they have water_services entry for current month
- * 4. If no water_service for current month, include them in results
+ * 3. Check if they have water_services entry in last 30 days
+ * 4. If no water_service in last 30 days, include them in results
  * 5. Sort by customers with most recent active services first
  */
 
@@ -64,12 +64,15 @@ try {
         exit();
     }
     
-    // Get current month and year
-    $currentMonth = date('m');
-    $currentYear = date('Y');
+    // Rolling 30-day pending window
+    $windowStartDate = date('Y-m-d', strtotime('-30 days'));
+    $todayDate = date('Y-m-d');
     $currentMonthName = date('F Y');
     
-    // Main query to get customers with active services and no water service this month
+    // Main query to get customers with PENDING PRODUCTS only:
+    // - AMC active
+    // - expand each service into battery products
+    // - include product only if no water service entry in LAST 30 DAYS for that exact service_id + battery_id
     $sql = "
         SELECT 
             c.id,
@@ -84,31 +87,65 @@ try {
             c.notes,
             c.created_at,
             c.updated_at,
-            -- Count of active services
-            COUNT(DISTINCT s.id) as active_services_count,
-            -- Most recent service date
-            MAX(s.created_at) as most_recent_service_date,
+            -- Count of pending product rows
+            COUNT(*) as active_services_count,
+            -- Most recent pending product service date
+            MAX(sp.created_at) as most_recent_service_date,
             -- Group all active services for display
-            GROUP_CONCAT(
-                DISTINCT CONCAT(
-                    s.service_code, '|',
-                    COALESCE(b.battery_model, 'Unknown'), '|',
-                    DATE_FORMAT(s.created_at, '%Y-%m-%d')
-                ) 
-                ORDER BY s.created_at DESC 
-                SEPARATOR '||'
-            ) as active_services_raw
+            GROUP_CONCAT(DISTINCT CONCAT(
+                sp.service_code, '|',
+                COALESCE(
+                    NULLIF(TRIM(
+                        CONCAT_WS(' ',
+                            COALESCE(b.battery_model, 'Unknown Battery'),
+                            CONCAT('(', COALESCE(b.battery_serial, 'N/A'), ')')
+                        )
+                    ), ''),
+                    'Unknown Product'
+                ), '|',
+                DATE_FORMAT(sp.created_at, '%Y-%m-%d')
+            ) ORDER BY sp.created_at DESC SEPARATOR '||') as active_services_raw
         FROM 
             customers c
         INNER JOIN 
-            service_orders s ON c.id = s.customer_id 
-            AND s.amc_status = 'active'
+            (
+                -- Products from service_order_batteries
+                SELECT DISTINCT
+                    s.id AS service_id,
+                    s.customer_id,
+                    s.service_code,
+                    s.created_at,
+                    sob.battery_id
+                FROM service_orders s
+                INNER JOIN service_order_batteries sob ON sob.service_order_id = s.id
+                WHERE s.amc_status = 'active'
+
+                UNION
+
+                -- Fallback for older rows with single battery_id and no junction rows
+                SELECT DISTINCT
+                    s.id AS service_id,
+                    s.customer_id,
+                    s.service_code,
+                    s.created_at,
+                    s.battery_id
+                FROM service_orders s
+                WHERE s.amc_status = 'active'
+                  AND s.battery_id IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM service_order_batteries sob2 WHERE sob2.service_order_id = s.id
+                  )
+            ) sp ON c.id = sp.customer_id
         LEFT JOIN 
-            batteries b ON s.battery_id = b.id
+            batteries b ON b.id = sp.battery_id
         LEFT JOIN 
-            water_services w ON c.id = w.customer_id 
-            AND MONTH(w.service_date) = :current_month 
-            AND YEAR(w.service_date) = :current_year
+            water_services w ON c.id = w.customer_id
+            AND w.service_id = sp.service_id
+            AND (
+                (w.battery_id IS NOT NULL AND sp.battery_id IS NOT NULL AND w.battery_id = sp.battery_id)
+                OR (w.battery_id IS NULL AND sp.battery_id IS NULL)
+            )
+            AND w.service_date BETWEEN :window_start_date AND :today_date
         WHERE 
             LOWER(TRIM(c.city)) = LOWER(TRIM(:city))
             AND w.id IS NULL
@@ -132,8 +169,8 @@ try {
     
     $stmt = $db->prepare($sql);
     $stmt->bindParam(':city', $city, PDO::PARAM_STR);
-    $stmt->bindParam(':current_month', $currentMonth, PDO::PARAM_STR);
-    $stmt->bindParam(':current_year', $currentYear, PDO::PARAM_STR);
+    $stmt->bindParam(':window_start_date', $windowStartDate, PDO::PARAM_STR);
+    $stmt->bindParam(':today_date', $todayDate, PDO::PARAM_STR);
     $stmt->execute();
     
     $customers = $stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -193,8 +230,10 @@ try {
                 'current_month' => $currentMonthName,
                 'last_service' => $lastWaterService,
                 'days_since_last_service' => $daysSinceLastService,
-                'pending_status' => $daysSinceLastService !== null 
-                    ? "No water service for {$daysSinceLastService} days" 
+                'pending_status' => $daysSinceLastService !== null
+                    ? ($daysSinceLastService >= 30
+                        ? "Due now ({$daysSinceLastService} days since last service)"
+                        : "Not due yet ({$daysSinceLastService} days since last service)")
                     : "Never had water service"
             ],
             'priority' => calculatePriority(
@@ -218,9 +257,9 @@ try {
         'current_month' => $currentMonthName,
         'total_pending_calls' => count($pendingCalls),
         'pending_calls' => $pendingCalls,
-        'message' => count($pendingCalls) > 0 
-            ? 'Pending calls retrieved successfully' 
-            : 'No pending calls found for this city'
+            'message' => count($pendingCalls) > 0
+            ? 'Pending product calls (30-day due) retrieved successfully'
+            : 'No pending product calls (30-day due) found for this city'
     ];
     
     echo json_encode($response, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);

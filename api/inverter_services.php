@@ -30,6 +30,8 @@ class InverterServiceAPI {
             ]);
             exit();
         }
+
+        $this->ensureInverterIdsColumn();
     }
     
     /**
@@ -66,6 +68,105 @@ class InverterServiceAPI {
         
         // If invalid date, return null
         return null;
+    }
+
+    private function ensureInverterIdsColumn() {
+        try {
+            $sql = "ALTER TABLE " . $this->table_name . " 
+                    ADD COLUMN inverter_ids LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL";
+            $this->conn->exec($sql);
+        } catch (PDOException $e) {
+            // Column likely already exists.
+        }
+    }
+
+    private function normalizeIdList($raw) {
+        if ($raw === null || $raw === '' || $raw === 'null') {
+            return [];
+        }
+
+        if (is_string($raw)) {
+            $decoded = json_decode($raw, true);
+            if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
+                $raw = $decoded;
+            }
+        }
+
+        if (!is_array($raw)) {
+            $raw = [$raw];
+        }
+
+        $result = [];
+        foreach ($raw as $value) {
+            if ($value === null || $value === '' || $value === 'null') {
+                continue;
+            }
+            $id = (int)$value;
+            if ($id > 0) {
+                $result[$id] = $id;
+            }
+        }
+
+        return array_values($result);
+    }
+
+    private function getSelectedInverterIds($data) {
+        if (!is_array($data)) {
+            return [];
+        }
+
+        $ids = $this->normalizeIdList($data['inverter_ids'] ?? null);
+        if (empty($ids)) {
+            $ids = $this->normalizeIdList($data['inverter_id'] ?? null);
+        }
+        return $ids;
+    }
+
+    private function getInvertersByIds($ids) {
+        $ids = $this->normalizeIdList($ids);
+        if (empty($ids)) {
+            return [];
+        }
+
+        $placeholders = implode(',', array_fill(0, count($ids), '?'));
+        $query = "SELECT id, inverter_model, inverter_brand, inverter_serial, power_rating, type, wave_type
+                  FROM inverters
+                  WHERE id IN ($placeholders)";
+        $stmt = $this->conn->prepare($query);
+        $stmt->execute($ids);
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        $byId = [];
+        foreach ($rows as $row) {
+            $byId[(int)$row['id']] = $row;
+        }
+
+        $ordered = [];
+        foreach ($ids as $id) {
+            if (isset($byId[$id])) {
+                $ordered[] = $byId[$id];
+            }
+        }
+        return $ordered;
+    }
+
+    private function hydrateServiceRow($service) {
+        if (!$service) {
+            return $service;
+        }
+
+        $decodedIds = [];
+        if (!empty($service['inverter_ids'])) {
+            $decodedIds = $this->normalizeIdList($service['inverter_ids']);
+        }
+
+        if (empty($decodedIds) && !empty($service['inverter_id'])) {
+            $decodedIds = [(int)$service['inverter_id']];
+        }
+
+        $service['inverter_ids'] = $decodedIds;
+        $service['inverters'] = $this->getInvertersByIds($decodedIds);
+        return $service;
     }
     
     // Generate unique service code
@@ -223,6 +324,10 @@ class InverterServiceAPI {
             
             $stmt->execute();
             $services = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            foreach ($services as &$service) {
+                $service = $this->hydrateServiceRow($service);
+            }
+            unset($service);
             
             http_response_code(200);
             echo json_encode([
@@ -265,6 +370,7 @@ class InverterServiceAPI {
             $stmt->execute();
             
             $service = $stmt->fetch(PDO::FETCH_ASSOC);
+            $service = $this->hydrateServiceRow($service);
             
             if ($service) {
                 http_response_code(200);
@@ -388,11 +494,9 @@ class InverterServiceAPI {
                 return;
             }
             
-            // Verify inverter exists ONLY if provided
-            $inverterId = null;
-            if (isset($data['inverter_id']) && !empty($data['inverter_id']) && $data['inverter_id'] !== 'null' && $data['inverter_id'] !== '') {
-                $inverterId = (int)$data['inverter_id'];
-                $inverter = $this->getInverterDetails($inverterId);
+            $inverterIds = $this->getSelectedInverterIds($data);
+            foreach ($inverterIds as $selectedId) {
+                $inverter = $this->getInverterDetails($selectedId);
                 if (!$inverter) {
                     http_response_code(400);
                     echo json_encode([
@@ -402,6 +506,7 @@ class InverterServiceAPI {
                     return;
                 }
             }
+            $inverterId = !empty($inverterIds) ? (int)$inverterIds[0] : null;
             
             // Generate unique service code
             $service_code = $this->generateServiceCode();
@@ -413,6 +518,7 @@ class InverterServiceAPI {
                         customer_id = :customer_id,
                         customer_phone = :customer_phone,
                         inverter_id = :inverter_id,
+                        inverter_ids = :inverter_ids,
                         service_staff_id = :service_staff_id,
                         issue_description = :issue_description,
                         warranty_status = :warranty_status,
@@ -448,6 +554,7 @@ class InverterServiceAPI {
             $stmt->bindParam(':customer_id', $data['customer_id']);
             $stmt->bindParam(':customer_phone', $customer_phone);
             $stmt->bindParam(':inverter_id', $inverterId, $inverterId === null ? PDO::PARAM_NULL : PDO::PARAM_INT);
+            $stmt->bindValue(':inverter_ids', json_encode($inverterIds), PDO::PARAM_STR);
             $stmt->bindParam(':service_staff_id', $service_staff_id, $service_staff_id === null ? PDO::PARAM_NULL : PDO::PARAM_INT);
             $stmt->bindParam(':issue_description', $issue_description);
             $stmt->bindParam(':warranty_status', $warranty_status);
@@ -529,8 +636,24 @@ class InverterServiceAPI {
                 return;
             }
             
-            // If inverter_id is provided and not empty, verify it exists
-            if (isset($data['inverter_id']) && !empty($data['inverter_id']) && $data['inverter_id'] !== 'null' && $data['inverter_id'] !== '') {
+            $hasInverterSelection = array_key_exists('inverter_ids', $data) || array_key_exists('inverter_id', $data);
+            $inverterIds = $hasInverterSelection ? $this->getSelectedInverterIds($data) : null;
+            if (is_array($inverterIds)) {
+                foreach ($inverterIds as $selectedId) {
+                    $inverter = $this->getInverterDetails($selectedId);
+                    if (!$inverter) {
+                        http_response_code(400);
+                        echo json_encode([
+                            "success" => false,
+                            "message" => "Invalid inverter ID"
+                        ]);
+                        return;
+                    }
+                }
+            }
+
+            // Backward compatibility check for inverter_id-only updates
+            if (!$hasInverterSelection && isset($data['inverter_id']) && !empty($data['inverter_id']) && $data['inverter_id'] !== 'null' && $data['inverter_id'] !== '') {
                 $inverter = $this->getInverterDetails($data['inverter_id']);
                 if (!$inverter) {
                     http_response_code(400);
@@ -597,6 +720,13 @@ class InverterServiceAPI {
                     }
                 }
             }
+
+            if ($hasInverterSelection) {
+                $update_fields[] = "inverter_id = :inverter_id";
+                $update_fields[] = "inverter_ids = :inverter_ids";
+                $params[':inverter_id'] = !empty($inverterIds) ? (int)$inverterIds[0] : null;
+                $params[':inverter_ids'] = json_encode($inverterIds ?? []);
+            }
             
             // Always update the updated_at timestamp
             $update_fields[] = "updated_at = NOW()";
@@ -617,8 +747,14 @@ class InverterServiceAPI {
             foreach ($params as $key => $value) {
                 if ($key === ':final_cost') {
                     $stmt->bindValue($key, $value, PDO::PARAM_STR);
+                } elseif ($key === ':inverter_ids') {
+                    $stmt->bindValue($key, $value, PDO::PARAM_STR);
                 } elseif ($key === ':id' || strpos($key, '_id') !== false) {
-                    $stmt->bindValue($key, $value, PDO::PARAM_INT);
+                    if ($value === null) {
+                        $stmt->bindValue($key, null, PDO::PARAM_NULL);
+                    } else {
+                        $stmt->bindValue($key, $value, PDO::PARAM_INT);
+                    }
                 } elseif ($key === ':estimated_completion_date') {
                     if ($value === null) {
                         $stmt->bindValue($key, null, PDO::PARAM_NULL);

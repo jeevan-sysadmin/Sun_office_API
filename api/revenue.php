@@ -509,7 +509,7 @@ function getWaterServicesExpenses($conn, $dateRange, $fromDate = null, $toDate =
         $dateInfo = buildExpenseDateConditions($dateRange, $fromDate, $toDate, $year, $month);
         
         $whereConditions = $dateInfo['conditions'];
-        $whereConditions[] = "service_type = 'water'";
+        $whereConditions[] = "LOWER(COALESCE(service_type, '')) IN ('water', 'water_service', 'water_services')";
         $params = $dateInfo['params'];
         
         $whereClause = !empty($whereConditions) ? 'WHERE ' . implode(' AND ', $whereConditions) : '';
@@ -559,7 +559,7 @@ function getInverterServicesExpenses($conn, $dateRange, $fromDate = null, $toDat
         $dateInfo = buildExpenseDateConditions($dateRange, $fromDate, $toDate, $year, $month);
         
         $whereConditions = $dateInfo['conditions'];
-        $whereConditions[] = "service_type = 'inverter'";
+        $whereConditions[] = "LOWER(COALESCE(service_type, '')) IN ('inverter', 'inverter_service', 'inverter_services')";
         $params = $dateInfo['params'];
         
         $whereClause = !empty($whereConditions) ? 'WHERE ' . implode(' AND ', $whereConditions) : '';
@@ -609,7 +609,7 @@ function getWaterServicesSalaries($conn, $dateRange, $fromDate = null, $toDate =
         $dateInfo = buildSalaryDateConditions($dateRange, $fromDate, $toDate, $year, $month);
         
         $whereConditions = $dateInfo['conditions'];
-        $whereConditions[] = "service_type = 'water'";
+        $whereConditions[] = "LOWER(COALESCE(service_type, '')) IN ('water', 'water_service', 'water_services')";
         $params = $dateInfo['params'];
         
         $whereClause = !empty($whereConditions) ? 'WHERE ' . implode(' AND ', $whereConditions) : '';
@@ -661,7 +661,7 @@ function getInverterServicesSalaries($conn, $dateRange, $fromDate = null, $toDat
         $dateInfo = buildSalaryDateConditions($dateRange, $fromDate, $toDate, $year, $month);
         
         $whereConditions = $dateInfo['conditions'];
-        $whereConditions[] = "service_type = 'inverter'";
+        $whereConditions[] = "LOWER(COALESCE(service_type, '')) IN ('inverter', 'inverter_service', 'inverter_services')";
         $params = $dateInfo['params'];
         
         $whereClause = !empty($whereConditions) ? 'WHERE ' . implode(' AND ', $whereConditions) : '';
@@ -702,6 +702,54 @@ function getInverterServicesSalaries($conn, $dateRange, $fromDate = null, $toDat
             'count' => 0,
             'unique_staff' => 0
         ];
+    }
+}
+
+/**
+ * Get Overall Expenses Summary (all service types + legacy records)
+ */
+function getOverallExpenses($conn, $dateRange, $fromDate = null, $toDate = null, $year = null, $month = null) {
+    try {
+        $dateInfo = buildExpenseDateConditions($dateRange, $fromDate, $toDate, $year, $month);
+        $whereConditions = $dateInfo['conditions'];
+        $params = $dateInfo['params'];
+        $whereClause = !empty($whereConditions) ? 'WHERE ' . implode(' AND ', $whereConditions) : '';
+
+        $query = "SELECT COALESCE(SUM(amount), 0) as total_expenses FROM expenses $whereClause";
+        $stmt = $conn->prepare($query);
+        foreach ($params as $key => $value) {
+            $stmt->bindValue($key, $value);
+        }
+        $stmt->execute();
+        $result = $stmt->fetch();
+        return floatval($result['total_expenses'] ?? 0);
+    } catch (PDOException $e) {
+        error_log("Error getting overall expenses: " . $e->getMessage());
+        return 0;
+    }
+}
+
+/**
+ * Get Overall Salaries Summary (all service types + legacy records)
+ */
+function getOverallSalaries($conn, $dateRange, $fromDate = null, $toDate = null, $year = null, $month = null) {
+    try {
+        $dateInfo = buildSalaryDateConditions($dateRange, $fromDate, $toDate, $year, $month);
+        $whereConditions = $dateInfo['conditions'];
+        $params = $dateInfo['params'];
+        $whereClause = !empty($whereConditions) ? 'WHERE ' . implode(' AND ', $whereConditions) : '';
+
+        $query = "SELECT COALESCE(SUM(net_amount), 0) as total_salaries FROM salary $whereClause";
+        $stmt = $conn->prepare($query);
+        foreach ($params as $key => $value) {
+            $stmt->bindValue($key, $value);
+        }
+        $stmt->execute();
+        $result = $stmt->fetch();
+        return floatval($result['total_salaries'] ?? 0);
+    } catch (PDOException $e) {
+        error_log("Error getting overall salaries: " . $e->getMessage());
+        return 0;
     }
 }
 
@@ -820,7 +868,7 @@ function getMonthlyWaterServicesExpenses($conn, $dateRange, $fromDate = null, $t
         $dateInfo = buildExpenseDateConditions($dateRange, $fromDate, $toDate, $year, $month);
         
         $whereConditions = $dateInfo['conditions'];
-        $whereConditions[] = "service_type = 'water'";
+        $whereConditions[] = "LOWER(COALESCE(service_type, '')) IN ('water', 'water_service', 'water_services')";
         $params = $dateInfo['params'];
         
         $whereClause = !empty($whereConditions) ? 'WHERE ' . implode(' AND ', $whereConditions) : '';
@@ -868,7 +916,7 @@ function getMonthlyInverterServicesExpenses($conn, $dateRange, $fromDate = null,
         $dateInfo = buildExpenseDateConditions($dateRange, $fromDate, $toDate, $year, $month);
         
         $whereConditions = $dateInfo['conditions'];
-        $whereConditions[] = "service_type = 'inverter'";
+        $whereConditions[] = "LOWER(COALESCE(service_type, '')) IN ('inverter', 'inverter_service', 'inverter_services')";
         $params = $dateInfo['params'];
         
         $whereClause = !empty($whereConditions) ? 'WHERE ' . implode(' AND ', $whereConditions) : '';
@@ -916,7 +964,7 @@ function getMonthlyWaterServicesSalaries($conn, $dateRange, $fromDate = null, $t
         $dateInfo = buildSalaryDateConditions($dateRange, $fromDate, $toDate, $year, $month);
         
         $whereConditions = $dateInfo['conditions'];
-        $whereConditions[] = "service_type = 'water'";
+        $whereConditions[] = "LOWER(COALESCE(service_type, '')) IN ('water', 'water_service', 'water_services')";
         $params = $dateInfo['params'];
         
         $whereClause = !empty($whereConditions) ? 'WHERE ' . implode(' AND ', $whereConditions) : '';
@@ -965,7 +1013,7 @@ function getMonthlyInverterServicesSalaries($conn, $dateRange, $fromDate = null,
         $dateInfo = buildSalaryDateConditions($dateRange, $fromDate, $toDate, $year, $month);
         
         $whereConditions = $dateInfo['conditions'];
-        $whereConditions[] = "service_type = 'inverter'";
+        $whereConditions[] = "LOWER(COALESCE(service_type, '')) IN ('inverter', 'inverter_service', 'inverter_services')";
         $params = $dateInfo['params'];
         
         $whereClause = !empty($whereConditions) ? 'WHERE ' . implode(' AND ', $whereConditions) : '';
@@ -1558,11 +1606,11 @@ $totalIncome = $totalWaterIncome + $totalInverterIncome;
 
 $totalWaterExpenses = $waterExpenses['total'];
 $totalInverterExpenses = $inverterExpenses['total'];
-$totalExpenses = $totalWaterExpenses + $totalInverterExpenses;
+$totalExpenses = getOverallExpenses($conn, $dateRange, $fromDate, $toDate, $year, $month);
 
 $totalWaterSalaries = $waterSalaries['total'];
 $totalInverterSalaries = $inverterSalaries['total'];
-$totalSalaries = $totalWaterSalaries + $totalInverterSalaries;
+$totalSalaries = getOverallSalaries($conn, $dateRange, $fromDate, $toDate, $year, $month);
 
 $totalWaterCosts = $totalWaterExpenses + $totalWaterSalaries;
 $totalInverterCosts = $totalInverterExpenses + $totalInverterSalaries;
@@ -1642,7 +1690,7 @@ $response = [
             'is_profitable' => $netProfit >= 0,
             'total_transactions' => $waterIncome['transaction_count'] + $inverterIncome['transaction_count'],
             'paid_transactions' => $paidCount,
-            'unique_customers' => $waterIncome['unique_customers'] + $inverterIncome['unique_customers']
+            'unique_customers' => count($topCustomers)
         ],
         'water_services' => [
             'income' => $waterIncome,
