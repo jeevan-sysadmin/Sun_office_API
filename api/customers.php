@@ -1,7 +1,7 @@
 <?php
-// Enable error reporting for debugging
-error_reporting(E_ALL);
-ini_set('display_errors', 1);
+// Keep runtime lean for API responses
+error_reporting(E_ALL & ~E_NOTICE & ~E_WARNING);
+ini_set('display_errors', 0);
 
 // Set headers
 header("Access-Control-Allow-Origin: *");
@@ -124,12 +124,23 @@ function getSingleCustomer($conn, $id) {
  * Get all customers
  */
 function getAllCustomers($conn) {
-    $sql = "SELECT c.*, 
-            (SELECT COUNT(*) FROM service_orders WHERE customer_id = c.id) as battery_service_count,
-            (SELECT COUNT(*) FROM inverter_services WHERE customer_id = c.id) as inverter_service_count,
-            (SELECT MAX(created_at) FROM service_orders WHERE customer_id = c.id) as last_battery_service,
-            (SELECT MAX(created_at) FROM inverter_services WHERE customer_id = c.id) as last_inverter_service
+    $sql = "SELECT 
+            c.*,
+            COALESCE(so_counts.battery_service_count, 0) as battery_service_count,
+            COALESCE(is_counts.inverter_service_count, 0) as inverter_service_count,
+            so_counts.last_battery_service,
+            is_counts.last_inverter_service
             FROM customers c
+            LEFT JOIN (
+                SELECT customer_id, COUNT(*) as battery_service_count, MAX(created_at) as last_battery_service
+                FROM service_orders
+                GROUP BY customer_id
+            ) so_counts ON so_counts.customer_id = c.id
+            LEFT JOIN (
+                SELECT customer_id, COUNT(*) as inverter_service_count, MAX(created_at) as last_inverter_service
+                FROM inverter_services
+                GROUP BY customer_id
+            ) is_counts ON is_counts.customer_id = c.id
             ORDER BY c.created_at DESC";
     
     try {
@@ -195,9 +206,6 @@ function handlePostCustomer($conn) {
     // Get JSON input
     $input = file_get_contents('php://input');
     $data = json_decode($input, true);
-    
-    // Log for debugging
-    error_log("POST Customer Data: " . print_r($data, true));
     
     // Validate required fields
     if (empty($data['full_name']) || empty($data['phone'])) {
@@ -290,8 +298,6 @@ function handlePutCustomer($conn) {
     // Get JSON input
     $input = file_get_contents('php://input');
     $data = json_decode($input, true);
-    
-    error_log("PUT Customer Data: " . print_r($data, true));
     
     // Validate required fields
     if (empty($data['id'])) {

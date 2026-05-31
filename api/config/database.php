@@ -6,27 +6,32 @@ class Database {
     private $db_name = "sun_office";
     private $username = "root";
     private $password = "";
-    private $conn;
+    private static $conn = null;
 
     public function getConnection() {
-        $this->conn = null;
+        if (self::$conn instanceof PDO) {
+            return self::$conn;
+        }
 
         try {
-            $this->conn = new PDO(
-                "mysql:host=" . $this->host . ";dbname=" . $this->db_name,
+            self::$conn = new PDO(
+                "mysql:host=" . $this->host . ";dbname=" . $this->db_name . ";charset=utf8mb4",
                 $this->username,
-                $this->password
+                $this->password,
+                [
+                    PDO::ATTR_PERSISTENT => true,
+                    PDO::ATTR_TIMEOUT => 3,
+                ]
             );
-            $this->conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-            $this->conn->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
-            $this->conn->setAttribute(PDO::ATTR_EMULATE_PREPARES, false);
-            $this->conn->exec("SET NAMES utf8mb4");
+            self::$conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+            self::$conn->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
+            self::$conn->setAttribute(PDO::ATTR_EMULATE_PREPARES, false);
         } catch(PDOException $exception) {
             error_log("Connection error: " . $exception->getMessage());
             return null;
         }
 
-        return $this->conn;
+        return self::$conn;
     }
 }
 

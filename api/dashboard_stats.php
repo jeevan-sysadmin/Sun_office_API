@@ -75,7 +75,7 @@ try {
     http_response_code(500);
 }
 
-echo json_encode($response, JSON_PRETTY_PRINT);
+echo json_encode($response);
 
 /**
  * Get overall summary statistics

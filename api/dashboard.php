@@ -12,9 +12,9 @@ if ($_SERVER['REQUEST_METHOD'] == 'OPTIONS') {
     exit();
 }
 
-// Error reporting for development
-error_reporting(E_ALL);
-ini_set('display_errors', 1);
+// Keep runtime lean for API responses
+error_reporting(E_ALL & ~E_NOTICE & ~E_WARNING);
+ini_set('display_errors', 0);
 
 // Include required files
 require_once __DIR__ . '/config/database.php';
