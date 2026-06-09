@@ -5,16 +5,23 @@
  */
 
 class DatabaseBackup {
-    private $host = 'localhost';
-    private $username = 'root';
-    private $password = '';
-    private $database = 'sun_office';
+    private $host;
+    private $username;
+    private $password;
+    private $database;
     private $backupDrive = 'E:';
     private $backupBasePath;
     private $backupPath;
     private $logFile;
 
     public function __construct() {
+        require_once __DIR__ . '/../api/config/database.php';
+        $config = getDatabaseConfig();
+        $this->host = $config['host'];
+        $this->username = $config['username'];
+        $this->password = $config['password'];
+        $this->database = $config['db_name'];
+
         // Display startup message
         if (php_sapi_name() === 'cli') {
             echo "Initializing Database Backup...\n";

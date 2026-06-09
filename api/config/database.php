@@ -2,22 +2,39 @@
 // C:\xampp\htdocs\sun_office\api\config\database.php
 
 class Database {
-    private $host = "localhost";
-    private $db_name = "sun_office";
-    private $username = "root";
-    private $password = "";
+    private static $config = [
+        'host' => 'localhost',
+        'db_name' => 'sun_office',
+        'username' => 'root',
+        'password' => '',
+        'charset' => 'utf8mb4'
+    ];
     private static $conn = null;
 
+    public static function getConfig() {
+        return self::$config;
+    }
+
+    public static function getDsn() {
+        $config = self::getConfig();
+        return "mysql:host={$config['host']};dbname={$config['db_name']};charset={$config['charset']}";
+    }
+
     public function getConnection() {
+        return self::getPdoConnection();
+    }
+
+    public static function getPdoConnection() {
         if (self::$conn instanceof PDO) {
             return self::$conn;
         }
 
         try {
+            $config = self::getConfig();
             self::$conn = new PDO(
-                "mysql:host=" . $this->host . ";dbname=" . $this->db_name . ";charset=utf8mb4",
-                $this->username,
-                $this->password,
+                self::getDsn(),
+                $config['username'],
+                $config['password'],
                 [
                     PDO::ATTR_PERSISTENT => true,
                     PDO::ATTR_TIMEOUT => 3,
@@ -33,6 +50,33 @@ class Database {
 
         return self::$conn;
     }
+
+    public static function getMysqliConnection() {
+        $config = self::getConfig();
+        mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
+
+        try {
+            $conn = new mysqli(
+                $config['host'],
+                $config['username'],
+                $config['password'],
+                $config['db_name']
+            );
+            $conn->set_charset($config['charset']);
+            return $conn;
+        } catch (mysqli_sql_exception $exception) {
+            error_log("MySQLi connection error: " . $exception->getMessage());
+            throw new Exception("Database connection failed: " . $exception->getMessage(), 0, $exception);
+        }
+    }
+}
+
+function getDatabaseConfig() {
+    return Database::getConfig();
+}
+
+function connectDB() {
+    return Database::getMysqliConnection();
 }
 
 // Test database connection

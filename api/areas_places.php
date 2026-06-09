@@ -11,11 +11,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     exit();
 }
 
-// Database configuration
-$host = "127.0.0.1";
-$dbname = "sun_office";
-$username = "root";
-$password = "";
+require_once __DIR__ . '/config/database.php';
 
 // Get request method
 $method = $_SERVER['REQUEST_METHOD'];
@@ -48,8 +44,10 @@ if (empty($endpoint)) {
 }
 
 try {
-    $pdo = new PDO("mysql:host=$host;dbname=$dbname;charset=utf8mb4", $username, $password);
-    $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+    $pdo = Database::getPdoConnection();
+    if (!$pdo) {
+        throw new Exception('Database connection failed');
+    }
     
     switch ($method) {
         case 'GET':

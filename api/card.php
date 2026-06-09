@@ -2,6 +2,12 @@
 session_start();
 require_once 'config/database.php';
 
+try {
+    $conn = connectDB();
+} catch (Exception $e) {
+    die('Database connection failed: ' . $e->getMessage());
+}
+
 // Check if user is logged in
 if (!isset($_SESSION['user_id'])) {
     header('Location: login.php');

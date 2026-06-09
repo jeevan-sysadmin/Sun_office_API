@@ -12,16 +12,13 @@ if ($_SERVER['REQUEST_METHOD'] == 'OPTIONS') {
     exit();
 }
 
-// Database configuration
-$host = '127.0.0.1';
-$dbname = 'sun_office';
-$username = 'root';
-$password = '';
+require_once __DIR__ . '/config/database.php';
 
 try {
-    $pdo = new PDO("mysql:host=$host;dbname=$dbname;charset=utf8mb4", $username, $password);
-    $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-    $pdo->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
+    $pdo = Database::getPdoConnection();
+    if (!$pdo) {
+        throw new Exception('Database connection failed');
+    }
     
     // Set collation for the connection - use utf8mb4_general_ci to match your tables
     $pdo->exec("SET NAMES utf8mb4 COLLATE utf8mb4_general_ci");

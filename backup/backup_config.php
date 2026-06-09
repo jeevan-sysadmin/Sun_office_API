@@ -3,13 +3,17 @@
  * Backup Configuration File
  */
 
+require_once __DIR__ . '/../api/config/database.php';
+
+$databaseConfig = getDatabaseConfig();
+
 return [
     // Database settings
     'database' => [
-        'host' => 'localhost',
-        'username' => 'root',
-        'password' => '',  // Add your MySQL password if set
-        'name' => 'sun_office'
+        'host' => $databaseConfig['host'],
+        'username' => $databaseConfig['username'],
+        'password' => $databaseConfig['password'],
+        'name' => $databaseConfig['db_name']
     ],
     
     // Backup settings

@@ -46,28 +46,20 @@ if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
     exit();
 }
 
-// Database configuration
-define('DB_HOST', 'localhost');
-define('DB_NAME', 'sun_office');
-define('DB_USER', 'root');
-define('DB_PASS', '');
+require_once __DIR__ . '/config/database.php';
 
 // Create database connection
 function getConnection() {
     try {
-        $conn = new PDO(
-            "mysql:host=" . DB_HOST . ";dbname=" . DB_NAME . ";charset=utf8mb4",
-            DB_USER,
-            DB_PASS,
-            [
-                PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-                PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-                PDO::ATTR_EMULATE_PREPARES => false
-            ]
-        );
+        $conn = Database::getPdoConnection();
+        if (!$conn) {
+            throw new Exception("Database connection failed");
+        }
         return $conn;
     } catch (PDOException $e) {
         sendResponse(500, false, "Database connection failed: " . $e->getMessage());
+    } catch (Exception $e) {
+        sendResponse(500, false, $e->getMessage());
         exit();
     }
 }

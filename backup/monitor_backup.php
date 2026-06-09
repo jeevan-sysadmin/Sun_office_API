@@ -5,11 +5,14 @@
 
 class BackupMonitor {
     private $backupDrive = 'E:';
-    private $database = 'sun_office';
+    private $database;
     private $backupPath;
     private $logFile;
 
     public function __construct() {
+        require_once __DIR__ . '/../api/config/database.php';
+        $config = getDatabaseConfig();
+        $this->database = $config['db_name'];
         $this->backupPath = $this->backupDrive . '\\MySQL_Backups\\' . $this->database;
         $this->logFile = $this->backupDrive . '\\MySQL_Backups\\backup_log.txt';
     }

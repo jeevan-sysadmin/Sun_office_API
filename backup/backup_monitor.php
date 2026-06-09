@@ -7,9 +7,12 @@
 class BackupMonitor {
     private $backupDrive = 'E:';
     private $backupPath;
-    private $database = 'sun_office';
+    private $database;
 
     public function __construct() {
+        require_once __DIR__ . '/../api/config/database.php';
+        $config = getDatabaseConfig();
+        $this->database = $config['db_name'];
         $this->backupPath = $this->backupDrive . '\\MySQL_Backups\\' . $this->database;
     }
 

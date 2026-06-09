@@ -42,21 +42,12 @@ function saveHistory($historyFile, $history) {
 }
 
 function exportDatabaseToSql($outputFile) {
-    $host = 'localhost';
-    $user = 'root';
-    $pass = '';
-    $dbName = 'sun_office';
+    require_once __DIR__ . '/config/database.php';
 
-    $conn = new mysqli($host, $user, $pass, $dbName);
-    if ($conn->connect_error) {
-        $dbName = 'sun_computers';
-        $conn = new mysqli($host, $user, $pass, $dbName);
-        if ($conn->connect_error) {
-            throw new Exception('Database connection failed');
-        }
-    }
+    $config = getDatabaseConfig();
+    $dbName = $config['db_name'];
+    $conn = connectDB();
 
-    $conn->set_charset('utf8mb4');
     $sql = "-- Sun Office Database Backup\n";
     $sql .= "-- Generated at: " . date('Y-m-d H:i:s') . "\n";
     $sql .= "-- Database: {$dbName}\n\n";

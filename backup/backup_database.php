@@ -5,16 +5,23 @@
  */
 
 class DatabaseBackup {
-    private $host = 'localhost';
-    private $username = 'root';
-    private $password = '';
-    private $database = 'sun_office';
+    private $host;
+    private $username;
+    private $password;
+    private $database;
     private $backupDrive = 'E:'; // Change this to your backup drive (E:, F:, etc.)
     private $backupPath;
     private $maxBackups = 30; // Keep last 30 backups
     private $logFile;
 
     public function __construct() {
+        require_once __DIR__ . '/../api/config/database.php';
+        $config = getDatabaseConfig();
+        $this->host = $config['host'];
+        $this->username = $config['username'];
+        $this->password = $config['password'];
+        $this->database = $config['db_name'];
+
         // Create backup directory path
         $this->backupPath = $this->backupDrive . '\\MySQL_Backups\\' . $this->database;
         $this->logFile = $this->backupDrive . '\\MySQL_Backups\\backup_log.txt';

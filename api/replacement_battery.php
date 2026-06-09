@@ -10,24 +10,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     exit();
 }
 
-// Include database connection
-$host = "localhost";
-$username = "root"; 
-$password = ""; 
-$database = "sun_powers";
+require_once __DIR__ . '/config/database.php';
 
-$conn = new mysqli($host, $username, $password, $database);
-
-if ($conn->connect_error) {
+try {
+    $conn = connectDB();
+} catch (Exception $e) {
     http_response_code(500);
     echo json_encode([
         'success' => false,
-        'message' => 'Database connection failed: ' . $conn->connect_error
+        'message' => $e->getMessage()
     ]);
     exit();
 }
-
-$conn->set_charset("utf8mb4");
 
 $method = $_SERVER['REQUEST_METHOD'];
 $request = $_SERVER['REQUEST_URI'];
