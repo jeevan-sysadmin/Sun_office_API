@@ -379,6 +379,7 @@ function handleGetRequest(PDO $pdo): void {
     }
 
     $whereSql = empty($where) ? '' : 'WHERE ' . implode(' AND ', $where);
+    $hasExplicitPagination = isset($params['limit']) || isset($params['page']);
     $limit = isset($params['limit']) ? max(1, (int)$params['limit']) : 50;
     $page = isset($params['page']) ? max(1, (int)$params['page']) : 1;
     $offset = ($page - 1) * $limit;
@@ -399,12 +400,16 @@ function handleGetRequest(PDO $pdo): void {
         LEFT JOIN customers c ON so.customer_id = c.id
         $whereSql
         ORDER BY so.created_at DESC
-        LIMIT ? OFFSET ?
     ";
-    $stmt = $pdo->prepare($sql);
+
     $exec = $qp;
-    $exec[] = $limit;
-    $exec[] = $offset;
+    if ($hasExplicitPagination) {
+        $sql .= " LIMIT ? OFFSET ?";
+        $exec[] = $limit;
+        $exec[] = $offset;
+    }
+
+    $stmt = $pdo->prepare($sql);
     $stmt->execute($exec);
     $rows = $stmt->fetchAll();
 

@@ -64,7 +64,7 @@ try {
         exit();
     }
     
-    // Rolling 30-day pending window
+    // Rolling 30-day pending window based on the actual payment history entry date
     $windowStartDate = date('Y-m-d', strtotime('-30 days'));
     $todayDate = date('Y-m-d');
     $currentMonthName = date('F Y');
@@ -73,6 +73,7 @@ try {
     // - AMC active
     // - expand each service into battery products
     // - include product only if no water service entry in LAST 30 DAYS for that exact service_id + battery_id
+    // - use DATE(created_at) first so a back-dated service_date does not make the call pending too early
     $sql = "
         SELECT 
             c.id,
@@ -145,7 +146,7 @@ try {
                 (w.battery_id IS NOT NULL AND sp.battery_id IS NOT NULL AND w.battery_id = sp.battery_id)
                 OR (w.battery_id IS NULL AND sp.battery_id IS NULL)
             )
-            AND w.service_date BETWEEN :window_start_date AND :today_date
+            AND COALESCE(DATE(w.created_at), w.service_date) BETWEEN :window_start_date AND :today_date
         WHERE 
             LOWER(TRIM(c.city)) = LOWER(TRIM(:city))
             AND w.id IS NULL
@@ -198,10 +199,11 @@ try {
         // Get last water service date for this customer
         $lastWaterService = getLastWaterService($db, $customer['id']);
         
-        // Calculate days since last water service
+        // Calculate days since last payment-history entry
         $daysSinceLastService = null;
         if ($lastWaterService) {
-            $lastDate = new DateTime($lastWaterService['service_date']);
+            $referenceDate = $lastWaterService['reference_date'] ?? $lastWaterService['service_date'];
+            $lastDate = new DateTime($referenceDate);
             $today = new DateTime();
             $interval = $lastDate->diff($today);
             $daysSinceLastService = $interval->days;
@@ -281,7 +283,7 @@ try {
 }
 
 /**
- * Get last water service for a customer
+ * Get last water service/payment entry for a customer
  */
 function getLastWaterService($db, $customerId) {
     try {
@@ -291,6 +293,7 @@ function getLastWaterService($db, $customerId) {
                 w.service_id,
                 w.amount,
                 w.service_date,
+                DATE(w.created_at) AS reference_date,
                 w.notes,
                 s.service_code
             FROM 
@@ -300,6 +303,7 @@ function getLastWaterService($db, $customerId) {
             WHERE 
                 w.customer_id = :customer_id
             ORDER BY 
+                DATE(w.created_at) DESC,
                 w.service_date DESC,
                 w.created_at DESC
             LIMIT 1
@@ -318,6 +322,7 @@ function getLastWaterService($db, $customerId) {
                 'service_code' => $result['service_code'],
                 'amount' => (float)$result['amount'],
                 'service_date' => $result['service_date'],
+                'reference_date' => $result['reference_date'],
                 'notes' => $result['notes']
             ];
         }
