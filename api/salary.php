@@ -85,6 +85,23 @@ function validateServiceType($service_type) {
 }
 
 /**
+ * Validate funding source
+ */
+function validateFundingSource($funding_source) {
+    return in_array($funding_source, ['business_income', 'raj_communication', 'owner_cash', 'other_borrowing']);
+}
+
+/**
+ * Normalize legacy or invalid service type values
+ */
+function normalizeServiceType($service_type) {
+    if ($service_type === 'both' || $service_type === 'both_services' || empty($service_type)) {
+        return 'water';
+    }
+    return $service_type;
+}
+
+/**
  * Get staff list for dropdown
  */
 function getStaffList($conn) {
@@ -690,6 +707,8 @@ function createSalary($conn) {
             }
         }
         
+        $data['service_type'] = normalizeServiceType($data['service_type']);
+
         // Validate service type
         if (!validateServiceType($data['service_type'])) {
             sendResponse(400, false, "Invalid service type. Must be 'water' or 'inverter'");
@@ -732,18 +751,31 @@ function createSalary($conn) {
         $staff_id = isset($data['staff_id']) && !empty($data['staff_id']) ? $data['staff_id'] : null;
         $payment_method = isset($data['payment_method']) ? $data['payment_method'] : 'bank_transfer';
         $transaction_id = isset($data['transaction_id']) ? $data['transaction_id'] : null;
+        $funding_source = isset($data['funding_source']) ? $data['funding_source'] : 'business_income';
+        $funding_amount = isset($data['funding_amount']) ? floatval($data['funding_amount']) : 0;
+        $funding_notes = isset($data['funding_notes']) ? $data['funding_notes'] : null;
         $bonus = isset($data['bonus']) ? floatval($data['bonus']) : 0;
         $deductions = isset($data['deductions']) ? floatval($data['deductions']) : 0;
         $notes = isset($data['notes']) ? $data['notes'] : null;
         $paid_by = isset($data['paid_by']) ? $data['paid_by'] : null;
+
+        if (!validateFundingSource($funding_source)) {
+            sendResponse(400, false, "Invalid funding source");
+        }
+
+        if ($funding_amount < 0) {
+            sendResponse(400, false, "Funding amount cannot be negative");
+        }
         
         // Insert salary
         $query = "INSERT INTO salary (
                     staff_id, staff_name, service_type, amount, salary_date, salary_month,
-                    payment_method, transaction_id, bonus, deductions, notes, paid_by
+                    payment_method, transaction_id, funding_source, funding_amount, funding_notes,
+                    bonus, deductions, notes, paid_by
                   ) VALUES (
                     :staff_id, :staff_name, :service_type, :amount, :salary_date, :salary_month,
-                    :payment_method, :transaction_id, :bonus, :deductions, :notes, :paid_by
+                    :payment_method, :transaction_id, :funding_source, :funding_amount, :funding_notes,
+                    :bonus, :deductions, :notes, :paid_by
                   )";
         
         $stmt = $conn->prepare($query);
@@ -756,6 +788,9 @@ function createSalary($conn) {
             ':salary_month' => $data['salary_month'],
             ':payment_method' => $payment_method,
             ':transaction_id' => $transaction_id,
+            ':funding_source' => $funding_source,
+            ':funding_amount' => $funding_amount,
+            ':funding_notes' => $funding_notes,
             ':bonus' => $bonus,
             ':deductions' => $deductions,
             ':notes' => $notes,
@@ -811,6 +846,7 @@ function updateSalary($conn, $id) {
         $allowed_fields = [
             'staff_id', 'staff_name', 'service_type', 'amount', 'salary_date', 
             'salary_month', 'payment_method', 'transaction_id', 
+            'funding_source', 'funding_amount', 'funding_notes',
             'bonus', 'deductions', 'notes', 'paid_by'
         ];
         
@@ -821,6 +857,10 @@ function updateSalary($conn, $id) {
             }
         }
         
+        if (isset($data['service_type'])) {
+            $data['service_type'] = normalizeServiceType($data['service_type']);
+        }
+
         // Validate service type if provided
         if (isset($data['service_type']) && !validateServiceType($data['service_type'])) {
             sendResponse(400, false, "Invalid service type. Must be 'water' or 'inverter'");
@@ -829,6 +869,14 @@ function updateSalary($conn, $id) {
         // Validate amount if provided
         if (isset($data['amount']) && (!is_numeric($data['amount']) || $data['amount'] <= 0)) {
             sendResponse(400, false, "Amount must be a positive number");
+        }
+
+        if (isset($data['funding_source']) && !validateFundingSource($data['funding_source'])) {
+            sendResponse(400, false, "Invalid funding source");
+        }
+
+        if (isset($data['funding_amount']) && (!is_numeric($data['funding_amount']) || floatval($data['funding_amount']) < 0)) {
+            sendResponse(400, false, "Funding amount cannot be negative");
         }
         
         // Validate date if provided

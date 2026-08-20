@@ -340,7 +340,11 @@ function handleGetRequest($db, $id) {
  */
 function handlePostRequest($db, $data) {
     // Validate required fields
-    if(empty($data->service_id) || empty($data->amount) || empty($data->service_date)) {
+    $hasServiceId = isset($data->service_id) && $data->service_id !== '' && intval($data->service_id) > 0;
+    $hasAmount = isset($data->amount) && $data->amount !== '' && is_numeric($data->amount);
+    $hasServiceDate = isset($data->service_date) && $data->service_date !== '';
+
+    if(!$hasServiceId || !$hasAmount || !$hasServiceDate) {
         http_response_code(400);
         echo json_encode(array(
             "success" => false,
@@ -351,12 +355,12 @@ function handlePostRequest($db, $data) {
         return;
     }
     
-    // Validate amount is numeric and positive
-    if(!is_numeric($data->amount) || floatval($data->amount) <= 0) {
+    // Validate amount is numeric and non-negative
+    if(!is_numeric($data->amount) || floatval($data->amount) < 0) {
         http_response_code(400);
         echo json_encode(array(
             "success" => false,
-            "message" => "Amount must be a positive number."
+            "message" => "Amount must be a non-negative number."
         ));
         return;
     }
@@ -528,11 +532,11 @@ function handlePutRequest($db, $id, $data) {
     }
     
     // Validate amount if provided
-    if(isset($data->amount) && (!is_numeric($data->amount) || floatval($data->amount) <= 0)) {
+    if(isset($data->amount) && $data->amount !== '' && (!is_numeric($data->amount) || floatval($data->amount) < 0)) {
         http_response_code(400);
         echo json_encode(array(
             "success" => false,
-            "message" => "Amount must be a positive number."
+            "message" => "Amount must be a non-negative number."
         ));
         return;
     }
